@@ -3,6 +3,18 @@ from services import conteudos_service
 from util.usuarios import profissional_autenticado
 
 conteudos_bp = Blueprint('conteudos', __name__, url_prefix='/api/conteudos')
+MAXIMO_DESTAQUES = 12
+
+
+@conteudos_bp.route('/destaques', methods=['GET'])
+def destaques():
+    try:
+        limite = int(request.args.get('limite', MAXIMO_DESTAQUES))
+        if not 1 <= limite <= MAXIMO_DESTAQUES:
+            raise ValueError()
+    except ValueError:
+        return jsonify({'error': f'limite deve ser de 1 a {MAXIMO_DESTAQUES}'}), 400
+    return jsonify({'conteudos': conteudos_service.destaques(limite)}), 200
 
 
 @conteudos_bp.route('/', methods=['POST'])

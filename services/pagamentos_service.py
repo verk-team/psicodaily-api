@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from database.db import transacao
-from services import notificacoes_service
+from services import notificacoes_service, planos_service
 from services.erros import ErroNegocio
 
 ARKHE_BASE_URL = os.getenv(
@@ -171,8 +171,10 @@ def criar_cobranca(paciente_id, papel, dados):
     id_cobranca, cobranca, _ = cobrar(metodo, centavos, cpf=cpf, vencimento=max(date.today(), inicio.date()))
 
     with transacao() as cur:
-        cur.execute('INSERT INTO PAGAMENTO (SESSAO_ID, ID_COBRANCA_ARKHE, METODO, VALOR_CENTAVOS) VALUES (?, ?, ?, ?)',
-                    (sessao_id, id_cobranca, metodo, centavos))
+        # A taxa fica gravada: trocar de plano depois nao muda o que este pagamento rende ao profissional
+        cur.execute('''INSERT INTO PAGAMENTO (SESSAO_ID, ID_COBRANCA_ARKHE, METODO, VALOR_CENTAVOS,
+                TAXA_PLATAFORMA_PERCENTUAL) VALUES (?, ?, ?, ?, ?)''',
+                    (sessao_id, id_cobranca, metodo, centavos, planos_service.taxa_atual(cur, profissional_id)))
     return cobranca
 
 
@@ -211,8 +213,9 @@ def _pagar_cartao(sessao_id, profissional_id, inicio, centavos, cartao):
     # nao cobra de novo, porque ela recusa venda igual por 5 minutos
     with transacao() as cur:
         cur.execute('''INSERT INTO PAGAMENTO (SESSAO_ID, ID_COBRANCA_ARKHE, METODO, VALOR_CENTAVOS, STATUS, PAGO_EM,
-                TAXA_ARKHE_CENTAVOS)
-            VALUES (?, ?, 'CARTAO', ?, 'PAGO', CURRENT_TIMESTAMP, ?)''', (sessao_id, id_compra, centavos, taxa))
+                TAXA_ARKHE_CENTAVOS, TAXA_PLATAFORMA_PERCENTUAL)
+            VALUES (?, ?, 'CARTAO', ?, 'PAGO', CURRENT_TIMESTAMP, ?, ?)''',
+                    (sessao_id, id_compra, centavos, taxa, planos_service.taxa_atual(cur, profissional_id)))
         emails = _sessao_paga(cur, sessao_id, profissional_id, inicio, 'CARTAO', id_compra)
     notificacoes_service.enviar_emails(emails)
     return venda

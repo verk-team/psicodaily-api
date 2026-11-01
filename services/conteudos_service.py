@@ -3,6 +3,7 @@ import re
 from database.db import transacao
 from services import assinaturas_service
 from services.erros import ErroNegocio
+from services.upload_service import upload_service
 
 COLUNAS = ('conteudo_id', 'profissional_id', 'titulo', 'corpo', 'publicado_em', 'atualizado_em')
 LIMITES = {'titulo': (3, 200), 'corpo': (1, 20000)}
@@ -54,6 +55,19 @@ def listar(profissional_id):
         cur.execute(f'''SELECT FIRST {MAXIMO_POR_LISTA} {', '.join(COLUNAS)} FROM CONTEUDO
             WHERE PROFISSIONAL_ID = ? ORDER BY PUBLICADO_EM DESC, CONTEUDO_ID DESC''', (profissional_id,))
         return [serializar(linha) for linha in cur.fetchall()]
+
+
+def destaques(limite):
+    """Artigos em destaque no site publico: os mais recentes de profissionais ativos com Premium valido."""
+    colunas = ', '.join(f'c.{coluna}' for coluna in COLUNAS)
+    with transacao() as cur:
+        cur.execute(f'''SELECT FIRST ? {colunas}, u.NOME FROM CONTEUDO c
+            JOIN USUARIO u ON u.ID_USUARIO = c.PROFISSIONAL_ID
+            JOIN ASSINATURA a ON a.PROFISSIONAL_ID = c.PROFISSIONAL_ID
+            WHERE u.ATIVO = TRUE AND a.PLANO = 'PREMIUM' AND a.VALIDA_ATE >= CURRENT_DATE
+            ORDER BY c.PUBLICADO_EM DESC, c.CONTEUDO_ID DESC''', (limite,))
+        return [{**serializar(linha), 'profissional_nome': linha[-1],
+                 'profissional_foto_url': upload_service.url_foto_usuario(linha[1])} for linha in cur.fetchall()]
 
 
 def criar(profissional_id, dados):

@@ -63,6 +63,54 @@ def test_permissoes(anonimo, paciente, psiquiatra, profissional, criar):
     assert psiquiatra.delete(f"/api/conteudos/{conteudo['conteudo_id']}").status_code == 404
 
 
+@pytest.fixture
+def profissional_inativo():
+    """Desativa o 22 quando o teste chamar e reativa no fim."""
+    yield lambda: executar('UPDATE USUARIO SET ATIVO = FALSE WHERE ID_USUARIO = ?', (PROFISSIONAL,))
+    executar('UPDATE USUARIO SET ATIVO = TRUE WHERE ID_USUARIO = ?', (PROFISSIONAL,))
+
+
+def destaques(anonimo, query=''):
+    r = anonimo.get(f'/api/conteudos/destaques{query}')
+    assert r.status_code == 200, r.get_json()
+    return r.get_json()['conteudos']
+
+
+def test_destaques_publicos_com_autor_e_mais_recentes_primeiro(anonimo, criar):
+    antigo = criar('Ansiedade', 'Respire.')
+    novo = criar('Sono', 'Durma bem.')
+    lista = destaques(anonimo)
+    assert [c['conteudo_id'] for c in lista[:2]] == [novo['conteudo_id'], antigo['conteudo_id']], lista
+    assert lista[0] == {**novo, 'profissional_nome': 'Ana Psicologa Teste', 'profissional_foto_url': lista[0]['profissional_foto_url']}, lista[0]
+    assert f'usuarios/{PROFISSIONAL}.jpg' in lista[0]['profissional_foto_url'], lista[0]
+
+
+@pytest.mark.parametrize('plano, dias', [('ESSENCIAL', 10), ('PROFISSIONAL', 10), ('PREMIUM', -1)])
+def test_destaques_so_de_premium_valido(anonimo, criar, assinatura, plano, dias):
+    conteudo = criar('Ansiedade', 'Respire.')
+    assert conteudo['conteudo_id'] in [c['conteudo_id'] for c in destaques(anonimo)]
+    assinatura(plano, dias=dias)
+    assert conteudo['conteudo_id'] not in [c['conteudo_id'] for c in destaques(anonimo)]
+
+
+def test_destaques_sem_profissional_inativo(anonimo, criar, profissional_inativo):
+    conteudo = criar('Ansiedade', 'Respire.')
+    profissional_inativo()
+    assert conteudo['conteudo_id'] not in [c['conteudo_id'] for c in destaques(anonimo)]
+
+
+def test_destaques_limite(anonimo, criar):
+    for numero in range(13):
+        criar(f'Artigo {numero}', 'Texto.')
+    assert len(destaques(anonimo)) == 12
+    assert len(destaques(anonimo, '?limite=2')) == 2
+
+
+@pytest.mark.parametrize('limite', ['0', '13', '-1', 'x'])
+def test_destaques_limite_invalido(anonimo, limite):
+    assert anonimo.get(f'/api/conteudos/destaques?limite={limite}').status_code == 400
+
+
 def test_edicao_parcial_e_remocao_pelo_dono(anonimo, profissional, criar):
     fica = criar('Ansiedade', 'Respire.')
     sai = criar('Sono', 'Durma bem.')

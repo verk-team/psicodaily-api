@@ -165,7 +165,9 @@ def executar_ferramenta(nome, entrada, paciente_id):
     """Roda uma ferramenta pedida pelo modelo. O paciente vem sempre do token, nunca da entrada."""
     if nome == 'buscar_profissionais':
         filtros = {campo: str(valor) for campo, valor in entrada.items()}
-        return _resumo(profissionais_service.buscar({**filtros, 'page_size': 5})['profissionais'], CAMPOS_PROFISSIONAL)
+        # A ordem padrao da busca poe o Premium primeiro; o assistente indica sem considerar patrocinio
+        pedido = {'ordenar': 'avaliacao', **filtros, 'page_size': 5}
+        return _resumo(profissionais_service.buscar(pedido)['profissionais'], CAMPOS_PROFISSIONAL)
     if nome == 'recomendados':
         resultado = profissionais_service.recomendados(paciente_id, 'PACIENTE')
         return {'questionario_respondido': resultado['questionario_respondido'],
