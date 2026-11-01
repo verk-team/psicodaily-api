@@ -5,16 +5,10 @@ from database.db import transacao
 from services import notificacoes_service, pagamentos_service
 from services.auditoria_service import auditar
 from services.erros import ErroNegocio
+from services.planos_service import PLANOS, plano_ativo
 
 logger = logging.getLogger(__name__)
 
-# 9: plano -> (nome, nivel, preco em centavos), como na pagina de assinaturas do front. Sem plano valido o
-# profissional some da busca; Profissional libera video e lista de espera; Premium, conteudos e o destaque.
-PLANOS = {
-    'ESSENCIAL': ('Essencial', 1, 5000),
-    'PROFISSIONAL': ('Profissional', 2, 10000),
-    'PREMIUM': ('Premium', 3, 15000),
-}
 # ponytail: um mes = 30 dias; mes de calendario se o dia do vencimento andar incomodar
 CICLO = timedelta(days=30)
 GRATIS = timedelta(days=30)
@@ -29,21 +23,15 @@ def libera(plano, minimo):
     return plano is not None and PLANOS[plano][1] >= PLANOS[minimo][1]
 
 
-def plano_ativo(cur, profissional_id):
-    cur.execute('SELECT PLANO FROM ASSINATURA WHERE PROFISSIONAL_ID = ? AND VALIDA_ATE >= CURRENT_DATE',
-                (profissional_id,))
-    linha = cur.fetchone()
-    return linha[0] if linha else None
-
-
 def exigir(cur, profissional_id, minimo):
     if not libera(plano_ativo(cur, profissional_id), minimo):
         raise ErroNegocio(f'Recurso do plano {PLANOS[minimo][0]} ou superior', 403, plano_necessario=minimo)
 
 
 def planos():
-    return [{'plano': plano, 'nome': nome, 'nivel': nivel, 'preco_centavos': preco}
-            for plano, (nome, nivel, preco) in PLANOS.items()]
+    return [{'plano': plano, 'nome': nome, 'nivel': nivel, 'preco_centavos': preco,
+             'taxa_plataforma_percentual': float(taxa)}
+            for plano, (nome, nivel, preco, taxa) in PLANOS.items()]
 
 
 def iniciar_gratis(cur, profissional_id):
@@ -231,7 +219,7 @@ def processar():
 
 def _gerar_renovacao(profissional_id, plano, valida_ate):
     """Sem cartao salvo nem recorrencia na Arkhé, a renovacao e um Pix enviado por e-mail e WhatsApp."""
-    nome, _, centavos = PLANOS[plano]
+    nome, _, centavos, _ = PLANOS[plano]
     id_arkhe, cobranca, _ = pagamentos_service.cobrar('PIX', centavos)
     with transacao() as cur:
         cur.execute('''INSERT INTO COBRANCA_ASSINATURA (PROFISSIONAL_ID, PLANO, METODO, ID_COBRANCA_ARKHE, VALOR_CENTAVOS)

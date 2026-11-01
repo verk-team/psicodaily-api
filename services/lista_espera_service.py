@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 
 from database.db import transacao
-from services import assinaturas_service, consultas_service, notificacoes_service
+from services import assinaturas_service, consultas_service, disponibilidade_service, notificacoes_service
 from services.erros import ErroNegocio
 
 JANELA_MAXIMA = timedelta(days=31)
@@ -71,11 +71,13 @@ def avisar_vaga(cur, profissional_id, inicio, fim, paciente_da_sessao):
     """
     if inicio <= datetime.now():
         return []
+    # Horario dentro de um bloqueio nao e vaga: ninguem conseguiria agendar, e a entrada segue na fila
+    sem_bloqueio, parametros_bloqueio = disponibilidade_service.fora_de_bloqueio('l.PROFISSIONAL_ID', inicio, fim)
     # WITH LOCK: dois cancelamentos ao mesmo tempo nao avisam a mesma entrada
-    cur.execute('''SELECT FIRST 1 LISTA_ESPERA_ID, PACIENTE_ID FROM LISTA_ESPERA
-        WHERE PROFISSIONAL_ID = ? AND AVISADO_EM IS NULL AND PACIENTE_ID <> ?
-          AND INICIO_DESEJADO <= ? AND FIM_DESEJADO >= ?
-        ORDER BY LISTA_ESPERA_ID WITH LOCK''', (profissional_id, paciente_da_sessao, inicio, fim))
+    cur.execute(f'''SELECT FIRST 1 l.LISTA_ESPERA_ID, l.PACIENTE_ID FROM LISTA_ESPERA l
+        WHERE l.PROFISSIONAL_ID = ? AND l.AVISADO_EM IS NULL AND l.PACIENTE_ID <> ?
+          AND l.INICIO_DESEJADO <= ? AND l.FIM_DESEJADO >= ? AND {sem_bloqueio}
+        ORDER BY l.LISTA_ESPERA_ID WITH LOCK''', (profissional_id, paciente_da_sessao, inicio, fim, *parametros_bloqueio))
     primeiro = cur.fetchone()
     if primeiro is None:
         return []

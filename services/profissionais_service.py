@@ -86,8 +86,17 @@ ORDENACOES = {
 	'avaliacao': "a.MEDIA DESC NULLS LAST, u.ID_USUARIO",
 	'experiencia': "p.ANO_INICIO_ATUACAO NULLS LAST, u.ID_USUARIO",
 }
-# Sem ordenar=, o Premium vem primeiro (destaque patrocinado); a ordem escolhida pelo paciente nao muda
-ORDEM_PADRAO = "CASE WHEN asn.PLANO = 'PREMIUM' THEN 0 ELSE 1 END, u.ID_USUARIO"
+# Sem ordenar=, o Premium vem primeiro (destaque patrocinado); a ordem escolhida pelo paciente nao muda.
+# Rodizio: a fila de Premium que atendem aos filtros anda uma posicao por dia, entao cada um fica em primeiro a cada
+# N dias e a ordem nao muda dentro do dia (a paginacao nao repete nem pula ninguem). O resto segue por ID.
+ORDEM_PADRAO = """CASE WHEN asn.PLANO = 'PREMIUM' THEN 0 ELSE 1 END,
+	CASE WHEN asn.PLANO = 'PREMIUM' THEN MOD(ROW_NUMBER() OVER (PARTITION BY asn.PLANO ORDER BY u.ID_USUARIO) + {dia},
+		COUNT(*) OVER (PARTITION BY asn.PLANO)) END,
+	u.ID_USUARIO"""
+
+
+def _dia_do_rodizio():
+	return date.today().toordinal()
 
 
 def _apresentar_perfil(profissional):
@@ -269,7 +278,7 @@ def _filtros(args):
 		filtros += " AND " + na_agenda
 		params.extend(parametros_agenda)
 
-	return filtros, params, page, page_size, ORDENACOES.get(ordenar, ORDEM_PADRAO)
+	return filtros, params, page, page_size, ORDENACOES.get(ordenar) or ORDEM_PADRAO.format(dia=_dia_do_rodizio())
 
 
 def buscar(args):

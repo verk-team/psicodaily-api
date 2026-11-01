@@ -1,5 +1,6 @@
 import os
 import threading
+from datetime import date, timedelta
 
 import pytest
 from werkzeug.serving import make_server
@@ -105,6 +106,30 @@ def agenda_vazia():
     for linha in original:
         executar('INSERT INTO DISPONIBILIDADE (PROFISSIONAL_ID, DIA_SEMANA, HORA_INICIO, HORA_FIM) VALUES (?, ?, ?, ?)',
                  (PROFISSIONAL, *linha))
+
+
+@pytest.fixture
+def bloqueios():
+    """Apaga os bloqueios de agenda criados pelo teste."""
+    ultimo = executar('SELECT COALESCE(MAX(BLOQUEIO_ID), 0) FROM BLOQUEIO_AGENDA')[0][0]
+    yield
+    executar('DELETE FROM BLOQUEIO_AGENDA WHERE BLOQUEIO_ID > ?', (ultimo,))
+
+
+@pytest.fixture
+def assinatura():
+    """Troca a assinatura do 22 no teste (`dias` ate o vencimento) e restaura no fim; as cobrancas criadas saem."""
+    colunas = 'PLANO, VALIDA_ATE, RENOVAR, PLANO_PROXIMO'
+    original = executar(f'SELECT {colunas} FROM ASSINATURA WHERE PROFISSIONAL_ID = ?', (PROFISSIONAL,))[0]
+    ultima = executar('SELECT COALESCE(MAX(COBRANCA_ID), 0) FROM COBRANCA_ASSINATURA')[0][0]
+
+    def definir(plano, dias=10, renovar=True, proximo=None):
+        executar(f"UPDATE ASSINATURA SET {colunas.replace(',', ' = ?,')} = ? WHERE PROFISSIONAL_ID = ?",
+                 (plano, date.today() + timedelta(days=dias), renovar, proximo, PROFISSIONAL))
+
+    yield definir
+    executar('DELETE FROM COBRANCA_ASSINATURA WHERE COBRANCA_ID > ?', (ultima,))
+    executar(f"UPDATE ASSINATURA SET {colunas.replace(',', ' = ?,')} = ? WHERE PROFISSIONAL_ID = ?", (*original, PROFISSIONAL))
 
 
 @pytest.fixture

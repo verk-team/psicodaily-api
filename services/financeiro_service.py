@@ -2,13 +2,11 @@ from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from database.db import transacao
-from services import notificacoes_service, pagamentos_service
+from services import notificacoes_service, pagamentos_service, planos_service
 from services.auditoria_service import auditar
 from services.erros import ErroNegocio
 
 STATUS_SAIDA = ('PENDENTE', 'PAGO')
-# 32 (decidido em 22/10/2026): a plataforma fica com 10%; a taxa do cartao da Arkhé tambem sai do profissional
-TAXA_PLATAFORMA = Decimal('0.10')
 PERIODOS_DIAS = ('7', '30', '90', '365')
 
 # Pagamento que ja pode ir para um repasse: pago, consulta realizada, sem reembolso e fora de outro repasse
@@ -39,9 +37,13 @@ SAIDAS = {
 }
 
 
-def liquido(valor, taxa_arkhe):
-    """(taxa da plataforma, liquido do profissional) de um pagamento, em centavos."""
-    taxa_plataforma = int((Decimal(valor) * TAXA_PLATAFORMA).quantize(Decimal('1'), ROUND_HALF_UP))
+def liquido(valor, taxa_arkhe, percentual):
+    """(taxa da plataforma, liquido do profissional) de um pagamento, em centavos.
+
+    `percentual` e o gravado no pagamento; a taxa do cartao da Arkhé tambem sai do profissional."""
+    if percentual is None:
+        percentual = planos_service.TAXA_PAGAMENTO_ANTIGO
+    taxa_plataforma = int((Decimal(valor) * percentual / 100).quantize(Decimal('1'), ROUND_HALF_UP))
     return taxa_plataforma, valor - taxa_plataforma - (taxa_arkhe or 0)
 
 
@@ -63,7 +65,7 @@ def ganhos(profissional_id, papel, dias):
     with transacao() as cur:
         # Todos os pagos (nao so os do periodo): o saldo a receber nao depende do filtro
         cur.execute('''SELECT p.SESSAO_ID, s.DATA_HORA_INICIO, s.STATUS, u.NOME, p.METODO, p.VALOR_CENTAVOS,
-                p.TAXA_ARKHE_CENTAVOS, p.PAGO_EM, r.REEMBOLSO_ID, rp.STATUS
+                p.TAXA_ARKHE_CENTAVOS, p.TAXA_PLATAFORMA_PERCENTUAL, p.PAGO_EM, r.REEMBOLSO_ID, rp.STATUS
             FROM PAGAMENTO p
             JOIN SESSAO s ON s.SESSAO_ID = p.SESSAO_ID
             JOIN USUARIO u ON u.ID_USUARIO = s.PACIENTE_ID
@@ -80,10 +82,12 @@ def ganhos(profissional_id, papel, dias):
         repasses = [{'repasse_id': repasse_id, 'valor_centavos': valor, 'status': status,
                      'criado_em': criado.isoformat(), 'pago_em': pago.isoformat() if pago else None}
                     for repasse_id, valor, status, criado, pago in cur.fetchall()]
+        taxa_atual = planos_service.taxa_atual(cur, profissional_id)
 
     consultas, do_periodo = [], []
-    for sessao_id, data, status_sessao, paciente, metodo, valor, taxa_arkhe, pago_em, reembolso, repasse in linhas:
-        taxa_plataforma, valor_liquido = liquido(valor, taxa_arkhe)
+    for (sessao_id, data, status_sessao, paciente, metodo, valor, taxa_arkhe, percentual, pago_em, reembolso,
+         repasse) in linhas:
+        taxa_plataforma, valor_liquido = liquido(valor, taxa_arkhe, percentual)
         consulta = {
             'sessao_id': sessao_id, 'data_sessao': data.isoformat(), 'paciente_nome': paciente, 'metodo': metodo,
             'valor_centavos': valor, 'taxa_plataforma_centavos': taxa_plataforma,
@@ -104,7 +108,7 @@ def ganhos(profissional_id, papel, dias):
     return {
         'dias': int(dias),
         'data_inicio': inicio.date().isoformat(),
-        'taxa_plataforma_percentual': float(TAXA_PLATAFORMA * 100),
+        'taxa_plataforma_percentual': float(taxa_atual),
         'resumo': {
             'consultas_realizadas': realizadas,
             'recebido_centavos': soma(validas, 'valor_centavos'),
@@ -136,12 +140,13 @@ def fechar_repasses(admin_id):
             cur.execute(f'UPDATE PAGAMENTO p SET REPASSE_ID = ? WHERE {ELEGIVEL_REPASSE.format(profissional="?")}',
                         (repasse_id, profissional_id))
             # O valor sai do que foi de fato vinculado: um fechamento ao mesmo tempo nao conta duas vezes
-            cur.execute('SELECT VALOR_CENTAVOS, TAXA_ARKHE_CENTAVOS FROM PAGAMENTO WHERE REPASSE_ID = ?', (repasse_id,))
+            cur.execute('''SELECT VALOR_CENTAVOS, TAXA_ARKHE_CENTAVOS, TAXA_PLATAFORMA_PERCENTUAL FROM PAGAMENTO
+                WHERE REPASSE_ID = ?''', (repasse_id,))
             pagamentos = cur.fetchall()
             if not pagamentos:
                 cur.execute('DELETE FROM REPASSE WHERE REPASSE_ID = ?', (repasse_id,))
                 continue
-            valor = sum(liquido(v, taxa)[1] for v, taxa in pagamentos)
+            valor = sum(liquido(*pagamento)[1] for pagamento in pagamentos)
             cur.execute('UPDATE REPASSE SET VALOR_CENTAVOS = ? WHERE REPASSE_ID = ?', (valor, repasse_id))
             auditar(cur, admin_id, 'REPASSE_CRIADO', 'REPASSE', repasse_id)
             criados.append({'repasse_id': repasse_id, 'profissional_id': profissional_id, 'valor_centavos': valor,

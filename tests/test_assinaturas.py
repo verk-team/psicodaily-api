@@ -4,8 +4,9 @@ from datetime import date, datetime, time, timedelta
 
 import pytest
 
-from apoio import PROFISSIONAL, executar
-from services import assinaturas_service, notificacoes_service, pagamentos_service
+from apoio import PACIENTE, PROFISSIONAL, PSIQUIATRA, executar
+from services import (assinaturas_service, assistente_service, notificacoes_service, pagamentos_service,
+                      profissionais_service)
 
 HOJE = date.today()
 CARTAO = {'numero_cartao': '4111111111111111', 'validade': '12/2030', 'cvv': '123', 'tipo': 'CREDITO'}
@@ -15,22 +16,6 @@ VIDEO = 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ'
 @pytest.fixture(autouse=True)
 def sem_email(monkeypatch):
     monkeypatch.setattr(notificacoes_service.email_service, 'enviar_email_async', lambda *email: None)
-
-
-@pytest.fixture
-def assinatura():
-    """Troca a assinatura do 22 no teste (`dias` ate o vencimento) e restaura no fim; as cobrancas criadas saem."""
-    colunas = 'PLANO, VALIDA_ATE, RENOVAR, PLANO_PROXIMO'
-    original = executar(f'SELECT {colunas} FROM ASSINATURA WHERE PROFISSIONAL_ID = ?', (PROFISSIONAL,))[0]
-    ultima = executar('SELECT COALESCE(MAX(COBRANCA_ID), 0) FROM COBRANCA_ASSINATURA')[0][0]
-
-    def definir(plano, dias=10, renovar=True, proximo=None):
-        executar(f"UPDATE ASSINATURA SET {colunas.replace(',', ' = ?,')} = ? WHERE PROFISSIONAL_ID = ?",
-                 (plano, HOJE + timedelta(days=dias), renovar, proximo, PROFISSIONAL))
-
-    yield definir
-    executar('DELETE FROM COBRANCA_ASSINATURA WHERE COBRANCA_ID > ?', (ultima,))
-    executar(f"UPDATE ASSINATURA SET {colunas.replace(',', ' = ?,')} = ? WHERE PROFISSIONAL_ID = ?", (*original, PROFISSIONAL))
 
 
 @pytest.fixture
@@ -82,6 +67,7 @@ def test_planos_e_permissoes(anonimo, paciente):
     planos = anonimo.get('/api/assinaturas/planos').get_json()['planos']
     assert [(p['plano'], p['preco_centavos']) for p in planos] == [
         ('ESSENCIAL', 5000), ('PROFISSIONAL', 10000), ('PREMIUM', 15000)], planos
+    assert [p['taxa_plataforma_percentual'] for p in planos] == [10, 8, 6], planos
     assert anonimo.get('/api/assinaturas/me').status_code == 401
     assert paciente.get('/api/assinaturas/me').status_code == 403
 
@@ -227,6 +213,68 @@ def test_travas_e_beneficios_por_plano(anonimo, paciente, profissional, assinatu
     relatorio = profissional.get('/api/profissionais/me/desempenho?dias=7').get_json()
     assert 'conversao' in relatorio and 'consultas' in relatorio['periodo_anterior'], relatorio
     assert profissional.get('/api/profissionais/me/desempenho?dias=15').status_code == 400
+
+
+@pytest.fixture
+def terceiro_premium():
+    """Mais um Premium, alem do 22 e do 24 do seed, para o rodizio ter uma fila de tres."""
+    novo = 900001
+    executar('''INSERT INTO USUARIO (ID_USUARIO, EMAIL, NOME, TELEFONE, CPF, USUARIO_ROLE, SENHA, ATIVO)
+        VALUES (?, 'terceiro.premium@exemplo.com', 'Terceiro Premium', '(11) 96666-6666', '52998224725', 'PSICOLOGO', 'x', TRUE)''',
+             (novo,))
+    executar('''INSERT INTO PROFISSIONAL (USUARIO_ID, CONSELHO_TIPO, CONSELHO_NUMERO, ESPECIALIDADE, PRECO_HORA, DESCRICAO)
+        VALUES (?, 'CRP', '06/900001', 'Psicologia', 20000, 'Profissional criado so para este teste.')''', (novo,))
+    executar("INSERT INTO ASSINATURA (PROFISSIONAL_ID, PLANO, VALIDA_ATE) VALUES (?, 'PREMIUM', '2099-12-31')", (novo,))
+    yield novo
+    executar('DELETE FROM PROFISSIONAL WHERE USUARIO_ID = ?', (novo,))
+    executar('DELETE FROM USUARIO WHERE ID_USUARIO = ?', (novo,))
+
+
+def fila_da_busca(cliente, monkeypatch, dia, consulta='page_size=100'):
+    monkeypatch.setattr(profissionais_service, '_dia_do_rodizio', lambda: dia)
+    return [p['id_usuario'] for p in cliente.get(f'/api/profissionais/?{consulta}').get_json()['profissionais']]
+
+
+def test_rodizio_dos_premium_anda_um_por_dia_e_para_dentro_do_dia(anonimo, monkeypatch, terceiro_premium):
+    premium = {PROFISSIONAL, PSIQUIATRA, terceiro_premium}
+    filas = [[i for i in fila_da_busca(anonimo, monkeypatch, dia) if i in premium] for dia in range(3)]
+    # Cada um e o primeiro uma vez a cada 3 dias, e a fila so gira: quem vem depois de quem nao muda
+    assert {fila[0] for fila in filas} == premium, filas
+    giros = [filas[0][i:] + filas[0][:i] for i in range(3)]
+    assert all(fila in giros for fila in filas), filas
+    assert fila_da_busca(anonimo, monkeypatch, 3)[:3] == fila_da_busca(anonimo, monkeypatch, 0)[:3]
+
+    # No mesmo dia, a ordem repete e as paginas nao repetem nem pulam ninguem
+    fila = fila_da_busca(anonimo, monkeypatch, 1)
+    assert fila_da_busca(anonimo, monkeypatch, 1) == fila
+    paginas = [i for pagina in range(1, len(fila) + 1)
+               for i in fila_da_busca(anonimo, monkeypatch, 1, f'page_size=1&page={pagina}')]
+    assert paginas == fila
+
+
+def test_premium_na_frente_e_ordem_escolhida_ignora_o_plano(anonimo, monkeypatch, assinatura):
+    assinatura('ESSENCIAL')
+    for dia in range(2):
+        fila = fila_da_busca(anonimo, monkeypatch, dia)
+        assert fila.index(PSIQUIATRA) < fila.index(PROFISSIONAL), fila
+    # 22 tem o preco menor: na ordem pedida pelo paciente, o Premium nao passa na frente
+    fila = fila_da_busca(anonimo, monkeypatch, 0, 'page_size=100&ordenar=preco')
+    assert fila.index(PROFISSIONAL) < fila.index(PSIQUIATRA), fila
+
+
+def test_assistente_nao_poe_premium_na_frente(paciente, assinatura):
+    assinatura('ESSENCIAL')
+    # Sem avaliacoes no seed, a ordem cai no ID: o Essencial 22 vem antes do Premium 24
+    achados = [p['id_usuario'] for p in assistente_service.executar_ferramenta('buscar_profissionais', {}, PACIENTE)]
+    assert achados.index(PROFISSIONAL) < achados.index(PSIQUIATRA), achados
+
+    def pontos():
+        recomendados = paciente.get('/api/profissionais/recomendados').get_json()['profissionais']
+        return next(p['pontuacao'] for p in recomendados if p['id_usuario'] == PROFISSIONAL)
+
+    essencial = pontos()
+    assinatura('PREMIUM')
+    assert pontos() == essencial, 'a recomendacao nao pode depender do plano'
 
 
 def test_desempenho_conta_as_visitas_ao_perfil(anonimo, profissional, assinatura):

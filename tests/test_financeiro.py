@@ -1,10 +1,15 @@
-# 32: financeiro do profissional (10% da plataforma + taxa do cartao da Arkhé) e repasses fechados e pagos pelo admin.
+# 32: financeiro do profissional (taxa da plataforma por plano + taxa do cartao da Arkhé) e repasses fechados e pagos
+# pelo admin. Pagamento com taxa nula e o anterior a gravacao da taxa: vale 10%.
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 import pytest
 
 from apoio import PACIENTE, PROFISSIONAL, executar
 from services import notificacoes_service, pagamentos_service
+from services.financeiro_service import liquido
+
+CARTAO = {'numero_cartao': '4111111111111111', 'validade': '12/2030', 'cvv': '123', 'tipo': 'CREDITO'}
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +55,77 @@ def arkhe(monkeypatch):
 
     monkeypatch.setattr(pagamentos_service, '_arkhe_request', responder)
     return estado
+
+
+@pytest.fixture
+def sessao_sem_pagamento(sessoes):
+    def criar():
+        inicio = (datetime.now() + timedelta(days=2)).replace(second=0, microsecond=0)
+        sid = executar('''INSERT INTO SESSAO (PACIENTE_ID, PROFISSIONAL_ID, DATA_HORA_INICIO, DATA_HORA_FIM, STATUS,
+            VALOR_CENTAVOS) VALUES (?, ?, ?, ?, 'AGENDADO', 15000) RETURNING SESSAO_ID''',
+                       (PACIENTE, PROFISSIONAL, inicio, inicio + timedelta(hours=1)))[0][0]
+        sessoes.append(sid)
+        return sid
+    return criar
+
+
+def cobrar(paciente, arkhe, sessao_id, metodo='PIX'):
+    """Paga pela rota de verdade, com a Arkhé falsa, e devolve a taxa gravada em PAGAMENTO."""
+    id_arkhe = 950000000 + sessao_id
+    arkhe['resposta'] = (201, {'aprovado': True, 'id_compra': id_arkhe, 'valor': 150.0} if metodo == 'CARTAO'
+                         else {'id_cobranca': id_arkhe, 'valor': 150.0, 'status': 0})
+    corpo = {'id_sessao': sessao_id, 'metodo': metodo, **({'cartao': CARTAO} if metodo == 'CARTAO' else {})}
+    r = paciente.post('/api/pagamentos/cobranca', json=corpo)
+    assert r.status_code == 201, r.get_json()
+    return executar('SELECT TAXA_PLATAFORMA_PERCENTUAL FROM PAGAMENTO WHERE SESSAO_ID = ?', (sessao_id,))[0][0]
+
+
+def test_liquido_usa_o_percentual_e_nulo_vale_10():
+    assert liquido(15000, None, None) == (1500, 13500)
+    assert liquido(15000, 750, Decimal('8.00')) == (1200, 13050)
+    # 751,5 centavos arredonda para cima, como antes
+    assert liquido(12525, None, Decimal('6.00')) == (752, 11773)
+
+
+@pytest.mark.parametrize('plano, dias, percentual', [
+    ('ESSENCIAL', 10, 10), ('PROFISSIONAL', 10, 8), ('PREMIUM', 10, 6),
+    ('PREMIUM', -1, 10),  # vencido = sem plano
+])
+def test_taxa_gravada_pelo_plano_no_pix_e_no_cartao(paciente, profissional, assinatura, arkhe, sessao_sem_pagamento,
+                                                    ultima_notificacao, plano, dias, percentual):
+    assinatura(plano, dias=dias)
+    assert cobrar(paciente, arkhe, sessao_sem_pagamento()) == percentual
+    assert cobrar(paciente, arkhe, sessao_sem_pagamento(), 'CARTAO') == percentual
+    assert profissional.get('/api/pagamentos/ganhos').get_json()['taxa_plataforma_percentual'] == percentual
+
+
+def test_trocar_de_plano_nao_muda_pagamento_ja_criado(admin, paciente, profissional, assinatura, arkhe, repasses,
+                                                      sessao_sem_pagamento, ultima_notificacao):
+    assinatura('PREMIUM')
+    sessao = sessao_sem_pagamento()
+    assert cobrar(paciente, arkhe, sessao) == 6
+    assinatura('ESSENCIAL')
+    executar("UPDATE PAGAMENTO SET STATUS = 'PAGO', PAGO_EM = CURRENT_TIMESTAMP WHERE SESSAO_ID = ?", (sessao,))
+    executar("UPDATE SESSAO SET STATUS = 'REALIZADO' WHERE SESSAO_ID = ?", (sessao,))
+
+    ganhos = profissional.get('/api/pagamentos/ganhos').get_json()
+    assert ganhos['taxa_plataforma_percentual'] == 10, 'o campo geral mostra o plano atual'
+    consulta = next(c for c in ganhos['consultas'] if c['sessao_id'] == sessao)
+    assert (consulta['taxa_plataforma_centavos'], consulta['liquido_centavos']) == (900, 14100), consulta
+
+    [repasse] = [r for r in admin.post('/api/admin/repasses').get_json()['repasses'] if r['profissional_id'] == PROFISSIONAL]
+    assert repasse['valor_centavos'] == 14100, repasse
+
+
+def test_pagamento_antigo_continua_a_10_em_qualquer_plano(admin, profissional, assinatura, consulta, repasses, ultima_notificacao):
+    assinatura('PREMIUM')
+    sessao = consulta()
+    ganhos = profissional.get('/api/pagamentos/ganhos').get_json()
+    assert ganhos['taxa_plataforma_percentual'] == 6
+    antigo = next(c for c in ganhos['consultas'] if c['sessao_id'] == sessao)
+    assert (antigo['taxa_plataforma_centavos'], antigo['liquido_centavos']) == (1500, 13500), antigo
+    [repasse] = [r for r in admin.post('/api/admin/repasses').get_json()['repasses'] if r['profissional_id'] == PROFISSIONAL]
+    assert repasse['valor_centavos'] == 13500, repasse
 
 
 def test_ganhos_separa_taxas_e_situacoes(profissional, paciente, consulta):

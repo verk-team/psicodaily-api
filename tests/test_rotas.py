@@ -78,6 +78,24 @@ def test_profissionais(anonimo, paciente, profissional):
     checar(profissional.patch('/api/profissionais/me', json={'foo': 1}), 400, 'error')
 
 
+def test_bloqueios_e_destaques(anonimo, paciente, profissional, bloqueios):
+    rota = '/api/profissionais/me/bloqueios'
+    checar(anonimo.get(rota), 401, 'error')
+    checar(paciente.get(rota), 403, 'error')
+    checar(profissional.get(rota), 200, 'bloqueios')
+    checar(profissional.post(rota, json={}), 400, 'error')
+    dia = (datetime.now() + timedelta(days=400)).date().isoformat()
+    criado = checar(profissional.post(rota, json={'inicio': dia, 'fim': dia}), 201, 'bloqueio', 'sessoes_no_periodo')
+    assert set(criado['bloqueio']) == {'bloqueio_id', 'inicio', 'fim'}, criado
+    checar(profissional.post(rota, json={'inicio': dia, 'fim': dia}), 409, 'error')
+    checar(paciente.delete(f"{rota}/{criado['bloqueio']['bloqueio_id']}"), 403, 'error')
+    checar(profissional.delete(f"{rota}/{criado['bloqueio']['bloqueio_id']}"), 200, 'message')
+    checar(profissional.delete(f"{rota}/{criado['bloqueio']['bloqueio_id']}"), 404, 'error')
+
+    checar(anonimo.get('/api/conteudos/destaques'), 200, 'conteudos')
+    checar(anonimo.get('/api/conteudos/destaques?limite=13'), 400, 'error')
+
+
 def test_registros_e_evolucao(paciente, profissional, registros):
     checar(profissional.get('/api/registros/'), 403, 'error')
     checar(paciente.get('/api/registros/?limite=0'), 400, 'error')

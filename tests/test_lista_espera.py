@@ -73,6 +73,25 @@ def test_entrar_listar_e_sair(paciente, outro_paciente, ultima_entrada):
     assert paciente.delete(f"/api/lista-espera/{entrada['lista_espera_id']}").status_code == 404
 
 
+def test_cancelamento_dentro_de_bloqueio_nao_avisa(paciente, outro_paciente, profissional, agenda_vazia, sessoes, bloqueios,
+                                                   ultima_entrada, ultima_notificacao, emails):
+    # Sessao marcada antes das ferias: o bloqueio nao a cancela, mas o horario dela nao vira vaga
+    r = outro_paciente.post('/api/consultas/', json={'id_profissional': PROFISSIONAL,
+                                                     'timestamp_inicio': em(15), 'timestamp_fim': em(16)})
+    assert r.status_code == 201, r.get_json()
+    sessao_id = r.get_json()['sessao']['sessao_id']
+    sessoes.append(sessao_id)
+    entrada = entrar(paciente, em(8), em(20)).get_json()['lista_espera']
+    assert profissional.post('/api/profissionais/me/bloqueios', json={'inicio': DIA.isoformat(), 'fim': DIA.isoformat()}).status_code == 201
+
+    emails.clear()
+    assert profissional.patch(f'/api/consultas/{sessao_id}', json={'status': 'CANCELADO'}).status_code == 200
+    assert not [email for email in emails if email[1].startswith('Abriu um horário')], emails
+    # A entrada segue na fila, para a proxima vaga de verdade
+    avisados = {e['lista_espera_id']: e['avisado_em'] for e in paciente.get('/api/lista-espera/').get_json()['lista_espera']}
+    assert avisados[entrada['lista_espera_id']] is None, avisados
+
+
 def test_cancelamento_avisa_so_o_primeiro_compativel(paciente, outro_paciente, profissional, agenda_vazia, sessoes,
                                                      ultima_entrada, ultima_notificacao, emails):
     r = outro_paciente.post('/api/consultas/', json={'id_profissional': PROFISSIONAL,

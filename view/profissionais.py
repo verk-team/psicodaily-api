@@ -40,6 +40,27 @@ def substituir_disponibilidade(dados_usuario):
 	return jsonify({'janelas': janelas}), 200
 
 
+@prof_bp.route('/me/bloqueios', methods=['GET'])
+@profissional_autenticado
+def bloqueios(dados_usuario):
+	resposta = jsonify({'bloqueios': disponibilidade_service.listar_bloqueios(dados_usuario['id_usuario'])})
+	resposta.headers['Cache-Control'] = 'private, no-store'
+	return resposta
+
+
+@prof_bp.route('/me/bloqueios', methods=['POST'])
+@profissional_autenticado
+def criar_bloqueio(dados_usuario):
+	return jsonify(disponibilidade_service.criar_bloqueio(dados_usuario['id_usuario'], request.get_json(silent=True))), 201
+
+
+@prof_bp.route('/me/bloqueios/<int:bloqueio_id>', methods=['DELETE'])
+@profissional_autenticado
+def apagar_bloqueio(dados_usuario, bloqueio_id):
+	disponibilidade_service.apagar_bloqueio(dados_usuario['id_usuario'], bloqueio_id)
+	return jsonify({'message': 'Bloqueio removido'}), 200
+
+
 @prof_bp.route('/me/desempenho', methods=['GET'])
 @profissional_autenticado
 def desempenho(dados_usuario):
