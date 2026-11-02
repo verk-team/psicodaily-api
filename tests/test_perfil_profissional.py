@@ -178,3 +178,23 @@ def test_cadastro_multipart(anonimo, envios, email_novo):
     # 9: todo cadastro comeca com 30 dias de Essencial gratis
     assert executar('SELECT PLANO, VALIDA_ATE FROM ASSINATURA WHERE PROFISSIONAL_ID = ?', (novo_usuario,)) == [
         ('ESSENCIAL', date.today() + timedelta(days=30))]
+
+
+@pytest.fixture
+def meta_original():
+    original = executar('SELECT META_MENSAL_CENTAVOS FROM PROFISSIONAL WHERE USUARIO_ID = ?', (PROFISSIONAL,))[0][0]
+    yield
+    executar('UPDATE PROFISSIONAL SET META_MENSAL_CENTAVOS = ? WHERE USUARIO_ID = ?', (original, PROFISSIONAL))
+
+
+def test_meta_mensal_editavel_e_privada(anonimo, paciente, profissional, meta_original):
+    assert profissional.patch('/api/profissionais/me', json={'meta_mensal': '5.000,50'}).status_code == 200
+    assert profissional.get('/api/usuarios/me').get_json()['usuario']['meta_mensal_centavos'] == 500050
+    # Nao aparece no perfil publico
+    assert 'meta_mensal_centavos' not in anonimo.get(f'/api/profissionais/{PROFISSIONAL}').get_json()['profissionais']
+    for invalida in ('-1', 'abc', '100000,01', True):
+        assert profissional.patch('/api/profissionais/me', json={'meta_mensal': invalida}).status_code == 400, invalida
+    assert profissional.patch('/api/profissionais/me', json={'meta_mensal': ''}).status_code == 200
+    assert profissional.get('/api/usuarios/me').get_json()['usuario']['meta_mensal_centavos'] is None
+    assert paciente.get('/api/usuarios/me').get_json()['usuario']['meta_mensal_centavos'] is None
+    assert paciente.patch('/api/profissionais/me', json={'meta_mensal': '10'}).status_code == 403

@@ -65,6 +65,7 @@ LEFT JOIN (
 
 MENSAGEM_VALOR = "Valor em reais deve ser positivo, ate 100000, com no maximo duas casas decimais"
 MENSAGEM_DESCRICAO = "Descricao deve ter entre 10 e 1000 caracteres"
+MENSAGEM_META = "Meta mensal em reais deve ser positiva, ate 100000, com no maximo duas casas decimais"
 
 # Campos opcionais do perfil: campo da API -> (normalizador, mensagem). A coluna e o nome em maiusculas.
 CAMPOS_OPCIONAIS = {
@@ -476,7 +477,7 @@ def cadastrar(formulario, imagem):
 
 
 def atualizar(id_profissional, formulario):
-	permitidos = {'descricao', 'preco_hora', *CAMPOS_OPCIONAIS}
+	permitidos = {'descricao', 'preco_hora', 'meta_mensal', *CAMPOS_OPCIONAIS}
 	if not isinstance(formulario, dict) or not formulario or not set(formulario).issubset(permitidos):
 		raise ErroNegocio("Campos permitidos: " + ", ".join(sorted(permitidos)))
 
@@ -491,6 +492,14 @@ def atualizar(id_profissional, formulario):
 		if preco_hora is None:
 			raise ErroNegocio(MENSAGEM_VALOR)
 		atualizacoes['PRECO_HORA'] = preco_hora
+	if 'meta_mensal' in formulario:
+		# Fora de CAMPOS_OPCIONAIS porque nao e do perfil publico. Vazio ou null volta para a meta automatica do front.
+		meta, centavos = formulario['meta_mensal'], None
+		if not _vazio(meta):
+			centavos = normalizar_valor_sessao(meta)
+			if centavos is None:
+				raise ErroNegocio(MENSAGEM_META)
+		atualizacoes['META_MENSAL_CENTAVOS'] = centavos
 	atualizacoes.update(_opcionais(formulario, limpar_vazios=True))
 
 	with transacao() as cur:

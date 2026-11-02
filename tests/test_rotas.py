@@ -92,8 +92,21 @@ def test_bloqueios_e_destaques(anonimo, paciente, profissional, bloqueios):
     checar(profissional.delete(f"{rota}/{criado['bloqueio']['bloqueio_id']}"), 200, 'message')
     checar(profissional.delete(f"{rota}/{criado['bloqueio']['bloqueio_id']}"), 404, 'error')
 
-    checar(anonimo.get('/api/conteudos/destaques'), 200, 'conteudos')
-    checar(anonimo.get('/api/conteudos/destaques?limite=13'), 400, 'error')
+    checar(anonimo.get('/api/artigos/destaques'), 200, 'artigos')
+    checar(anonimo.get('/api/artigos/destaques?limite=13'), 400, 'error')
+
+
+def test_artigos(anonimo, paciente, profissional):
+    checar(anonimo.get('/api/artigos/'), 401, 'error')
+    checar(paciente.get('/api/artigos/'), 200, 'page', 'page_size', 'total', 'total_pages', 'artigos')
+    checar(paciente.get('/api/artigos/?page=0'), 400, 'error')
+    checar(paciente.get('/api/artigos/999999'), 404, 'error')
+    checar(paciente.post('/api/artigos/', json={}), 403, 'error')
+    checar(profissional.post('/api/artigos/', json={}), 400, 'error')
+    checar(profissional.patch('/api/artigos/999999', json={'titulo': 'Titulo'}), 404, 'error')
+    checar(profissional.delete('/api/artigos/999999'), 404, 'error')
+    checar(paciente.post('/api/artigos/999999/curtida'), 404, 'error')
+    checar(paciente.delete('/api/artigos/999999/curtida'), 404, 'error')
 
 
 def test_registros_e_evolucao(paciente, profissional, registros):

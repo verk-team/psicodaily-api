@@ -77,8 +77,10 @@ def cadastrar_paciente(formulario, imagem):
 
 def perfil(id_usuario):
     with transacao() as cur:
-        cur.execute("SELECT ID_USUARIO, NOME, EMAIL, USUARIO_ROLE, TELEFONE, CPF FROM USUARIO WHERE ID_USUARIO = ? AND ATIVO = TRUE",
-                    (id_usuario,))
+        # A meta mensal sai aqui, e nao no perfil publico do profissional: so o dono ve (null para paciente e admin)
+        cur.execute('''SELECT u.ID_USUARIO, u.NOME, u.EMAIL, u.USUARIO_ROLE, u.TELEFONE, u.CPF, p.META_MENSAL_CENTAVOS
+            FROM USUARIO u LEFT JOIN PROFISSIONAL p ON p.USUARIO_ID = u.ID_USUARIO
+            WHERE u.ID_USUARIO = ? AND u.ATIVO = TRUE''', (id_usuario,))
         usuario = cur.fetchone()
     if usuario is None:
         raise ErroNegocio("Usuario indisponivel", 401)
@@ -87,6 +89,7 @@ def perfil(id_usuario):
         "email": usuario[2], "tipo_usuario": usuario[3],
         "telefone": usuario[4], "cpf": usuario[5],
         "foto_url": upload_service.url_foto_usuario(usuario[0]),
+        "meta_mensal_centavos": usuario[6],
     }
 
 
