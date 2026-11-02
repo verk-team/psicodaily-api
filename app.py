@@ -42,7 +42,6 @@ app.register_blueprint(signaling_bp)
 
 app.register_blueprint(auth_bp)
 app.register_blueprint(usuarios_bp)
-# app.register_blueprint(agendamento_bp)
 app.register_blueprint(registros_bp)
 app.register_blueprint(prontuario_bp)
 app.register_blueprint(prof_bp)
