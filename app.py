@@ -16,7 +16,7 @@ from view.profissionais import prof_bp
 from view.consultas import cons_bp
 from view.encaminhamentos import encam_bp
 from view.pagamentos import pagamentos_bp
-from view.conteudos import conteudos_bp
+from view.artigos import artigos_bp
 from view.favoritos import favoritos_bp
 from view.admin import admin_bp
 from view.notificacoes import notificacoes_bp
@@ -49,7 +49,7 @@ app.register_blueprint(prof_bp)
 app.register_blueprint(cons_bp)
 app.register_blueprint(encam_bp)
 app.register_blueprint(pagamentos_bp)
-app.register_blueprint(conteudos_bp)
+app.register_blueprint(artigos_bp)
 app.register_blueprint(favoritos_bp)
 app.register_blueprint(admin_bp)
 app.register_blueprint(notificacoes_bp)

@@ -4,7 +4,7 @@ from decimal import Decimal
 # pagamentos_service.cobrar: morando la, o import seria circular.
 
 # 9: plano -> (nome, nivel, preco em centavos, taxa da plataforma em %), como na pagina de assinaturas do front. Sem
-# plano valido o profissional some da busca; Profissional libera video e lista de espera; Premium, conteudos e o destaque.
+# plano valido o profissional some da busca; Profissional libera video e lista de espera; Premium, artigos e o destaque.
 PLANOS = {
     'ESSENCIAL': ('Essencial', 1, 5000, Decimal('10')),
     'PROFISSIONAL': ('Profissional', 2, 10000, Decimal('8')),

@@ -1,5 +1,5 @@
 # 9: assinatura do profissional 22. Cada mes e uma cobranca avulsa na Arkhé; o job confirma as pagas e gera o Pix
-# da renovacao; sem plano valido o profissional some da busca; video, lista de espera e conteudos sao travados por plano.
+# da renovacao; sem plano valido o profissional some da busca; video, lista de espera e artigos sao travados por plano.
 from datetime import date, datetime, time, timedelta
 
 import pytest
@@ -197,9 +197,9 @@ def test_travas_e_beneficios_por_plano(anonimo, paciente, profissional, assinatu
     espera = paciente.post('/api/lista-espera/', json={'id_profissional': PROFISSIONAL, 'inicio': inicio.isoformat(),
                                                       'fim': (inicio + timedelta(hours=2)).isoformat()})
     assert espera.status_code == 409, espera.get_json()
-    conteudo = profissional.post('/api/conteudos/', json={'titulo': 'Ansiedade', 'corpo': 'Texto'})
-    assert conteudo.status_code == 403 and conteudo.get_json()['plano_necessario'] == 'PREMIUM', conteudo.get_json()
-    assert anonimo.get(f'/api/profissionais/{PROFISSIONAL}/conteudos').get_json()['conteudos'] == []
+    artigo = profissional.post('/api/artigos/', json={'titulo': 'Ansiedade', 'subtitulo': 'Sub', 'corpo': 'Texto'})
+    assert artigo.status_code == 403 and artigo.get_json()['plano_necessario'] == 'PREMIUM', artigo.get_json()
+    assert paciente.get(f'/api/artigos/?autor={PROFISSIONAL}').get_json()['artigos'] == []
     assert profissional.get('/api/profissionais/me/desempenho').status_code == 403
 
     assinatura('PROFISSIONAL')
