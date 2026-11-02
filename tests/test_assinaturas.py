@@ -66,7 +66,7 @@ def avisos(ultima_notificacao):
 def test_planos_e_permissoes(anonimo, paciente):
     planos = anonimo.get('/api/assinaturas/planos').get_json()['planos']
     assert [(p['plano'], p['preco_centavos']) for p in planos] == [
-        ('ESSENCIAL', 5000), ('PROFISSIONAL', 10000), ('PREMIUM', 15000)], planos
+        ('ESSENCIAL', 4999), ('PROFISSIONAL', 7999), ('PREMIUM', 11999)], planos
     assert [p['taxa_plataforma_percentual'] for p in planos] == [10, 8, 6], planos
     assert anonimo.get('/api/assinaturas/me').status_code == 401
     assert paciente.get('/api/assinaturas/me').status_code == 403
@@ -78,12 +78,12 @@ def test_pix_ativa_o_plano_quando_pago(profissional, assinatura, arkhe, ultima_n
     assert r.status_code == 201, r.get_json()
     corpo = r.get_json()
     assert corpo['cobranca']['metodo'] == 'PIX' and corpo['assinatura']['ativa'] is False, corpo
-    assert arkhe['chamadas'][-1] == ('POST', '/api/v1/cobrancas/pix', {'valor': 100.0})
+    assert arkhe['chamadas'][-1] == ('POST', '/api/v1/cobrancas/pix', {'valor': 79.99})
 
     # Pedir de novo reaproveita o Pix aberto em vez de criar outro
     de_novo = profissional.post('/api/assinaturas/me', json={'plano': 'PROFISSIONAL'}).get_json()
     assert de_novo['cobranca']['cobranca_id'] == corpo['cobranca']['cobranca_id']
-    assert cobrancas() == [('PROFISSIONAL', 'PIX', 10000, 'PENDENTE')]
+    assert cobrancas() == [('PROFISSIONAL', 'PIX', 7999, 'PENDENTE')]
 
     arkhe['status'][corpo['cobranca']['id_cobranca']] = 1
     me = profissional.get('/api/assinaturas/me').get_json()['assinatura']
@@ -97,13 +97,13 @@ def test_cartao_aprova_na_hora_e_upgrade_reinicia_o_ciclo(profissional, admin, a
     antes = admin.get('/api/admin/metricas?dias=7').get_json()['assinaturas']
     r = profissional.post('/api/assinaturas/me', json={'plano': 'PREMIUM', 'metodo': 'CARTAO', 'cartao': CARTAO})
     assert r.status_code == 201, r.get_json()
-    assert arkhe['chamadas'][-1] == ('POST', '/api/v1/vendas/cartao', {**CARTAO, 'parcelas': 1, 'valor': 150.0})
+    assert arkhe['chamadas'][-1] == ('POST', '/api/v1/vendas/cartao', {**CARTAO, 'parcelas': 1, 'valor': 119.99})
     # Sem proporcional: os 20 dias do Essencial nao viram credito
     assert estado() == ('PREMIUM', HOJE + timedelta(days=30), True, None)
-    assert cobrancas() == [('PREMIUM', 'CARTAO', 15000, 'PAGO')]
+    assert cobrancas() == [('PREMIUM', 'CARTAO', 11999, 'PAGO')]
     # A receita da assinatura entra nas metricas do admin, fora do faturamento das consultas
     depois = admin.get('/api/admin/metricas?dias=7').get_json()['assinaturas']
-    assert depois['receita_centavos'] == antes['receita_centavos'] + 15000, depois
+    assert depois['receita_centavos'] == antes['receita_centavos'] + 11999, depois
     assert depois['ativas_por_plano']['PREMIUM'] == antes['ativas_por_plano']['PREMIUM'] + 1, depois
 
 
@@ -149,7 +149,7 @@ def test_job_gera_o_pix_da_renovacao_uma_vez_e_confirma_o_pago(assinatura, arkhe
     # Vence em 2 dias com downgrade agendado: a renovacao ja sai no plano novo
     assinatura('PREMIUM', dias=2, proximo='ESSENCIAL')
     assinaturas_service.processar()
-    assert cobrancas() == [('ESSENCIAL', 'PIX', 5000, 'PENDENTE')]
+    assert cobrancas() == [('ESSENCIAL', 'PIX', 4999, 'PENDENTE')]
     assert avisos(ultima_notificacao) == ['ASSINATURA_RENOVACAO']
     aviso = executar('SELECT MENSAGEM FROM NOTIFICACAO WHERE NOTIFICACAO_ID > ? AND USUARIO_ID = ?',
                      (ultima_notificacao, PROFISSIONAL))[0][0]
@@ -161,7 +161,7 @@ def test_job_gera_o_pix_da_renovacao_uma_vez_e_confirma_o_pago(assinatura, arkhe
     arkhe['status'][arkhe['ultimo_id']] = 1
     assinaturas_service.processar()
     assert estado() == ('ESSENCIAL', HOJE + timedelta(days=32), True, None)
-    assert cobrancas() == [('ESSENCIAL', 'PIX', 5000, 'PAGO')]
+    assert cobrancas() == [('ESSENCIAL', 'PIX', 4999, 'PAGO')]
 
 
 def test_job_nao_renova_quem_cancelou_nem_quem_vence_depois(assinatura, arkhe):

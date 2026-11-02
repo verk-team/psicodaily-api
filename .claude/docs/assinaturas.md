@@ -6,7 +6,7 @@ Legenda: **API** = backend pronto, falta o front · **novo** = falta backend e f
 
 ## Planos
 
-### Essencial: R$ 50/mês, para atender
+### Essencial: R$ 49,99/mês, para atender
 
 | Benefício | Estado |
 |---|---|
@@ -17,7 +17,7 @@ Legenda: **API** = backend pronto, falta o front · **novo** = falta backend e f
 | Chat com pacientes e encaminhamentos | API |
 | Bloqueio de férias e folgas | novo |
 
-### Profissional: R$ 100/mês, para encher a agenda
+### Profissional: R$ 79,99/mês, para encher a agenda
 
 Tudo do Essencial, mais:
 
@@ -29,7 +29,7 @@ Tudo do Essencial, mais:
 | Visualizações do perfil, consultas e novos favoritos | API |
 | Sessões recorrentes: mesmo paciente, mesmo horário toda semana | novo |
 
-### Premium: R$ 150/mês, para ganhar visibilidade
+### Premium: R$ 119,99/mês, para ganhar visibilidade
 
 Tudo do Profissional, mais:
 
@@ -63,6 +63,6 @@ Tudo do Profissional, mais:
 
 ## A confirmar
 
-1. **Taxas de 8% e 6%:** confirmadas em 01/11/2026; a plataforma aceita a perda de receita acima de R$ 2.500/mês.
+1. **Taxas de 8% e 6%:** confirmadas em 01/11/2026; a plataforma aceita a perda de receita acima de R$ 2.500/mês. Com os preços de 02/11/2026 (R$ 49,99, R$ 79,99 e R$ 119,99), essa perda começa antes: R$ 1.500/mês no Profissional e R$ 2.000/mês no Premium. É de propósito, para a troca de plano compensar para o profissional.
 2. **Suporte em 1 dia útil:** o time consegue cumprir esse prazo?
 3. **Publicidade:** validar o topo pago da busca e a divulgação de preços com jurídico ou CRP/CRM (art. 20 do Código de Ética do Psicólogo e regras do CFM, citados de memória).

@@ -5,10 +5,12 @@ from decimal import Decimal
 
 # 9: plano -> (nome, nivel, preco em centavos, taxa da plataforma em %), como na pagina de assinaturas do front. Sem
 # plano valido o profissional some da busca; Profissional libera video e lista de espera; Premium, artigos e o destaque.
+# Precos pensados para subir de plano compensar: a taxa menor paga a diferenca a partir de R$ 1.500/mes em consultas
+# (Profissional) e R$ 2.000/mes (Premium). Com 20 consultas de R$ 150, o Premium sai R$ 50 mais barato que o Essencial.
 PLANOS = {
-    'ESSENCIAL': ('Essencial', 1, 5000, Decimal('10')),
-    'PROFISSIONAL': ('Profissional', 2, 10000, Decimal('8')),
-    'PREMIUM': ('Premium', 3, 15000, Decimal('6')),
+    'ESSENCIAL': ('Essencial', 1, 4999, Decimal('10')),
+    'PROFISSIONAL': ('Profissional', 2, 7999, Decimal('8')),
+    'PREMIUM': ('Premium', 3, 11999, Decimal('6')),
 }
 TAXA_SEM_PLANO = Decimal('10')
 # Pagamentos anteriores a taxa gravada: e historico, entao nao acompanha uma mudanca futura nos valores acima
