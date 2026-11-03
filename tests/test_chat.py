@@ -9,7 +9,10 @@ import pytest
 import simple_websocket
 
 from apoio import ADMIN, PACIENTE, PORTA, PROFISSIONAL, PSIQUIATRA, executar
+from botocore.exceptions import ClientError
+
 from services import chat_service
+from services.erros import ErroNegocio
 from services.auth_service import gerar_token
 
 
@@ -171,3 +174,21 @@ def test_arquivo(anonimo, paciente, outro_paciente, profissional, vinculo, ultim
     assert corpo['nome'] == 'Exame de sangue.pdf' and corpo['expira_em_segundos'] == 300, corpo
     for trecho in (chat_service.upload_service.bucket_privado, chave, 'X-Amz-Expires=300', 'response-content-disposition='):
         assert trecho in corpo['url'], (trecho, corpo['url'])
+
+
+@pytest.mark.parametrize('inicio, tipo', [
+    (b'OggS\x00\x02', 'audio/ogg'), (b'\x1aE\xdf\xa3\x01', 'audio/webm'), (b'ID3\x04\x00', 'audio/mpeg'),
+    (b'\xff\xfb\x90\x64', 'audio/mpeg'), (b'\x00\x00\x00\x20ftypM4A ', 'audio/mp4'), (b'%PDF-1.4', 'application/pdf'),
+    (b'GIF89a', None), (b'MZ\x90\x00', None),
+])
+def test_tipo_pelos_primeiros_bytes(inicio, tipo):
+    assert chat_service._tipo_do_arquivo(inicio)[0] == tipo
+
+
+def test_falha_no_r2_vira_503(monkeypatch):
+    def negar(*args, **kwargs):
+        raise ClientError({'Error': {'Code': 'AccessDenied', 'Message': 'Access Denied'}}, 'PutObject')
+    monkeypatch.setattr(chat_service.upload_service.s3, 'upload_fileobj', negar)
+    with pytest.raises(ErroNegocio) as erro:
+        chat_service.upload_service.enviar_privado(b'%PDF-1.4', 'chat/teste.pdf', 'application/pdf')
+    assert erro.value.status == 503

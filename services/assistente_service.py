@@ -3,6 +3,7 @@ import logging
 import os
 import threading
 from datetime import date, datetime, timedelta
+from time import sleep
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -14,19 +15,30 @@ logger = logging.getLogger(__name__)
 # Gemini no plano gratuito, pelo endpoint no formato da OpenAI (trocado do Groq em 22/10/2026, que era lento).
 # Outro provedor compativel = trocar URL, modelo e a variavel da chave.
 URL_LLM = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
-# 3.5 Flash: ~1,3 s por rodada com ferramentas em 22/10/2026; o 3.8 nao aceita 'minimal' e vivia sobrecarregado (503)
-MODELO = 'gemini-3.5-flash'
+# Flash-lite: o 3.5 Flash gratis so da 20 requisicoes por dia (03/11/2026), e cada pergunta gasta de 1 a 3;
+# o 3.8 nao aceita 'minimal' e vivia sobrecarregado (503)
+MODELO = 'gemini-3.5-flash-lite'
 MAXIMO_MENSAGENS = 40
 MAXIMO_CARACTERES = 2000
 MAXIMO_RODADAS = 8
 MAXIMO_HORARIOS = 20
+# No plano gratuito o Gemini devolve 503 (sobrecarga) e 429 (limite por minuto) com frequencia, e costuma passar
+# em segundos. Timeout nao entra: ja esperou 30 s.
+ERROS_PASSAGEIROS = {429, 500, 503, 504}
+INDISPONIVEL = 'O assistente está indisponível no momento. Tente novamente em instantes.'
+ESPERAS_NOVA_TENTATIVA = (2, 5)
 
-SISTEMA = '''Voce e o assistente do PsicoDaily, plataforma que conecta pacientes a psicologos e psiquiatras.
-Fale em portugues do Brasil, com frases curtas e acolhedoras.
+SISTEMA = '''Voce e o assistente virtual do PsicoDaily chamado Psicosinho (sempre comece se apresentando caso o user cumprimente), plataforma que conecta pacientes a psicologos e psiquiatras.
+Fale em portugues do Brasil, com tom profissional, cordial e objetivo, como o atendimento de uma clinica:
+- trate o paciente por "voce", sem girias, sem emojis e sem exclamacoes em excesso;
+- responda em ate 4 frases curtas ou numa lista; com varios profissionais ou horarios, use uma lista com um item por linha;
+- seja acolhedor sem ser intimo; nao faca promessas sobre o tratamento;
+- termine, quando fizer sentido, com o proximo passo concreto (ex.: "Quer que eu verifique os horarios dela?").
 
 Voce ajuda o paciente a: entender como a plataforma funciona, encontrar profissionais, ver horarios livres e montar um agendamento.
 As ferramentas usam precos em centavos; para o paciente, mostre sempre em reais (15000 = R$ 150,00).
 Use as ferramentas para qualquer dado de profissionais, horarios ou consultas; nunca invente nomes, precos ou horarios.
+Chame juntas, na mesma rodada, as ferramentas que nao dependem uma da outra.
 Para agendar, chame propor_agendamento; para cancelar, chame propor_cancelamento com o sessao_id de minhas_consultas. O paciente confirma depois (botao no site ou SIM no WhatsApp): nunca diga que a consulta ja foi marcada ou cancelada.
 
 Como a plataforma funciona:
@@ -34,11 +46,12 @@ Como a plataforma funciona:
 - Busca: filtros por especialidade, abordagem, modalidade, preco, idioma, area de atuacao, avaliacao, experiencia e disponibilidade.
 - Favoritos: o paciente salva profissionais e ve o proximo horario livre de cada um.
 - Lista de espera: se nao houver horario, o paciente entra na lista do profissional e e avisado quando uma vaga abrir (a vaga nao fica reservada).
-- Pagamento: na tela da consulta, por PIX, boleto ou cartao (credito ou debito), todos pelo banco Arkhé. O boleto vai para o CPF do paciente, que precisa ter conta na Arkhé, e vence no dia da consulta; o cartao precisa ser emitido pela Arkhé. A consulta passa de AGENDADO para CONFIRMADO quando o pagamento e confirmado (no cartao, na hora).
+- Pagamento: na tela da consulta, por PIX, boleto ou cartao (credito ou debito), todos pelo banco Arkhé. O boleto vai para o CPF do paciente, que precisa ter conta na Arkhé, e vence no dia da consulta; o cartao precisa ser emitido pela Arkhé. A consulta so fica marcada com o pagamento: ao escolher o horario, ele fica reservado por 30 minutos e, sem pagamento, a reserva e cancelada. Pago, passa de AGENDADO para CONFIRMADO (no cartao, na hora).
 - Cancelamento: o paciente cancela pela tela da consulta ate 15 minutos antes do horario, com reembolso integral do que pagou; depois disso nao da mais para cancelar. Se o profissional cancelar, o reembolso tambem e integral. O reembolso e devolvido pela equipe da plataforma.
 - Reagendamento: o paciente cancela e marca outro horario, ou pede ao profissional pelo chat.
-- Chat: liberado entre paciente e profissional depois que existe uma consulta; aceita texto, PDF e imagens ate 10 MB.
-- Videochamada: pelo botao de entrar na sala da consulta, no horario marcado.
+- Chat: liberado entre paciente e profissional depois que existe uma consulta; aceita texto, PDF, imagens e audio ate 10 MB.
+- Videochamada: pelo botao de entrar na sala da consulta paga, a partir de 15 minutos antes do horario.
+- Avaliacao: depois da consulta, o paciente da uma nota de 1 a 5 e pode deixar um comentario publico (anonimo, no perfil do profissional) ou privado (so o profissional le).
 
 Limites:
 - Voce nao faz atendimento psicologico, diagnostico nem indica medicacao. Acolha e sugira um profissional.
@@ -91,7 +104,8 @@ FERRAMENTAS = [
     },
     {
         'name': 'propor_agendamento',
-        'description': 'Mostra ao paciente um botao para confirmar a consulta. Use um horario devolvido por horarios_livres.',
+        'description': ('Mostra ao paciente um botao para confirmar a consulta. Se o paciente ja disse dia e hora, chame direto, '
+                        'sem horarios_livres (fim = inicio + 1h); se o horario nao estiver livre, o erro traz os livres do dia.'),
         'input_schema': {
             'type': 'object',
             'properties': {
@@ -135,16 +149,22 @@ def _chamar(mensagens):
         'Content-Type': 'application/json',
         'User-Agent': 'psicodaily-api',
     })
-    try:
-        with urlopen(req, timeout=30) as resposta:
-            return json.load(resposta)['choices'][0]['message']
-    except HTTPError as erro:
-        if erro.code == 429:
-            raise ErroNegocio('Limite gratuito do assistente atingido, tente de novo mais tarde', 503)
-        raise ErroNegocio('Assistente indisponivel no momento, tente de novo em instantes', 503)
-    except OSError:
-        # URLError e timeout de leitura
-        raise ErroNegocio('Assistente indisponivel no momento, tente de novo em instantes', 503)
+    for espera in (*ESPERAS_NOVA_TENTATIVA, None):
+        try:
+            with urlopen(req, timeout=30) as resposta:
+                return json.load(resposta)['choices'][0]['message']
+        except HTTPError as erro:
+            # O corpo diz qual limite estourou (por minuto ou por dia); sem isso nao da para escolher a correcao
+            logger.warning('Gemini respondeu %s: %s', erro.code, erro.read(500).decode(errors='replace'))
+            if erro.code == 429 and espera is None:
+                raise ErroNegocio('O assistente está com muitas solicitações no momento. Tente novamente em alguns minutos.', 503)
+            if erro.code not in ERROS_PASSAGEIROS or espera is None:
+                raise ErroNegocio(INDISPONIVEL, 503)
+        except OSError:
+            # URLError e timeout de leitura
+            logger.warning('Gemini sem resposta', exc_info=True)
+            raise ErroNegocio(INDISPONIVEL, 503)
+        sleep(espera)
 
 
 def _resumo(itens, campos):
@@ -157,8 +177,21 @@ def _propor(id_profissional, inicio, fim):
     livres = disponibilidade_service.horarios_livres(id_profissional, dia, dia)['horarios']
     # Vale o horario exato que a agenda devolveu; o POST /api/consultas revalida tudo na confirmacao.
     if not any(h['inicio'] == inicio[:16] and h['fim'] == fim[:16] for h in livres):
-        raise ErroNegocio('Horario nao esta livre; consulte horarios_livres de novo')
+        # Os livres vao junto para o modelo corrigir sem gastar outra rodada com horarios_livres
+        raise ErroNegocio(f'Horario nao esta livre. Livres neste dia: {json.dumps(livres[:MAXIMO_HORARIOS])}')
     return {'id_profissional': id_profissional, 'timestamp_inicio': inicio[:16], 'timestamp_fim': fim[:16]}
+
+
+def _quando(texto_iso):
+    momento = datetime.fromisoformat(texto_iso)
+    return f'{momento:%d/%m} às {momento:%H:%M}'
+
+
+def _texto_da_proposta(tipo, proposta):
+    if tipo == 'agendamento':
+        return f'O horário de {_quando(proposta["timestamp_inicio"])} está livre.'
+    reembolso = ', com reembolso integral do que você pagou' if proposta['reembolso_integral'] else ''
+    return f'Posso cancelar sua consulta com {proposta["profissional_nome"]} de {_quando(proposta["inicio"])}{reembolso}.'
 
 
 def executar_ferramenta(nome, entrada, paciente_id):
@@ -230,6 +263,12 @@ def conversar(paciente_id, papel, dados):
                 # Argumentos fora do schema: o modelo ve o erro e tenta de novo
                 conteudo = 'Erro: argumentos invalidos para esta ferramenta'
             mensagens.append({'role': 'tool', 'tool_call_id': chamada['id'], 'name': nome, 'content': conteudo})
+
+        # Com a proposta pronta, a resposta e fixa: o site e o WhatsApp ja mostram a confirmacao, e o modelo nao gasta
+        # mais uma chamada do limite por minuto so para dizer "confirme abaixo"
+        textos = [_texto_da_proposta(tipo, proposta) for tipo, proposta in propostas.items() if proposta]
+        if textos:
+            return {'resposta': ' '.join(textos), **propostas}
 
     raise ErroNegocio('O assistente nao concluiu a resposta, tente reformular a pergunta', 502)
 
@@ -310,7 +349,9 @@ def _executar(paciente_id, tipo, dados):
     """O SIM do paciente: agenda ou cancela pelas mesmas regras das rotas do site."""
     if tipo == 'agendamento':
         consultas_service.agendar(paciente_id, 'PACIENTE', dados)
-        return 'Pronto, consulta agendada! Para confirmá-la, pague pela tela da consulta no site.'
+        minutos = int(consultas_service.RESERVA_SEM_PAGAMENTO.total_seconds() // 60)
+        return (f'Horário reservado por {minutos} minutos. A consulta só é confirmada com o pagamento, '
+                'feito na tela da consulta no site.')
     reembolso = consultas_service.cancelar(paciente_id, 'PACIENTE', dados['sessao_id'])['reembolso_centavos']
     if reembolso:
         valor = f'{reembolso / 100:.2f}'.replace('.', ',')

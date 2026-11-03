@@ -23,6 +23,11 @@ def profissional(id):
 	return jsonify({'message': 'Profissionais obtidos com sucesso', 'profissionais': profissionais_service.detalhe(id)}), 200
 
 
+@prof_bp.route('/<int:id>/avaliacoes', methods=['GET'])
+def avaliacoes(id):
+	return jsonify({'avaliacoes': profissionais_service.avaliacoes_publicas(id)}), 200
+
+
 @prof_bp.route('/<int:id>/disponibilidade', methods=['GET'])
 def disponibilidade(id):
 	return jsonify({'janelas': disponibilidade_service.listar(id)}), 200

@@ -86,26 +86,41 @@ def test_busca_por_disponibilidade_aceita_o_formato(busca):
 
 def test_avaliacao(anonimo, paciente, outro_paciente, profissional, busca, sessoes):
     realizada = nova_sessao(sessoes, 'REALIZADO', datetime(2026, 9, 1, 10), datetime(2026, 9, 1, 11))
-    realizada2 = nova_sessao(sessoes, 'REALIZADO', datetime(2026, 9, 2, 10), datetime(2026, 9, 2, 11))
     agendada = nova_sessao(sessoes, 'AGENDADO', datetime(2030, 1, 1, 10), datetime(2030, 1, 1, 11))
+    # Paga, mas ainda nao comecou; e sem pagamento, mesmo ja passada
+    confirmada_futura = nova_sessao(sessoes, 'CONFIRMADO', datetime(2030, 1, 2, 10), datetime(2030, 1, 2, 11))
+    nao_paga = nova_sessao(sessoes, 'AGENDADO', datetime(2026, 9, 3, 10), datetime(2026, 9, 3, 11))
     url = f'/api/consultas/{realizada}/avaliacao'
 
     assert anonimo.post(url, json={'nota': 5}).status_code == 401
     assert profissional.post(url, json={'nota': 5}).status_code == 403
     assert outro_paciente.post(url, json={'nota': 5}).status_code == 404
-    assert paciente.post(f'/api/consultas/{agendada}/avaliacao', json={'nota': 5}).status_code == 409
+    for sessao in (agendada, confirmada_futura, nao_paga):
+        assert paciente.post(f'/api/consultas/{sessao}/avaliacao', json={'nota': 5}).status_code == 409, sessao
     for corpo in ({'nota': 6}, {'nota': 0}, {'nota': True}, {'nota': 4.5}, {'nota': '5'}, {},
-                  {'nota': 5, 'extra': 1}, {'nota': 5, 'comentario': 'x' * 501}, {'nota': 5, 'comentario': 3}):
+                  {'nota': 5, 'extra': 1}, {'nota': 5, 'comentario': 'x' * 501}, {'nota': 5, 'comentario': 3},
+                  {'nota': 5, 'publica': 'sim'}, {'nota': 5, 'publica': 1}):
         assert paciente.post(url, json=corpo).status_code == 400, corpo
 
     # Aspas curvas, travessao e emoji (F0.1) no comentario
-    r = paciente.post(url, json={'nota': 5, 'comentario': '  “ótima” – recomendo 😊  '})
+    r = paciente.post(url, json={'nota': 5, 'comentario': '  “ótima” – recomendo 😊  ', 'publica': True})
     assert r.status_code == 201, r.get_json()
     comentario = executar('SELECT COMENTARIO FROM AVALIACAO WHERE SESSAO_ID = ?', (realizada,))[0][0]
     assert comentario == '“ótima” – recomendo 😊', comentario
-    assert r.get_json()['avaliacao'] == {'sessao_id': realizada, 'nota': 5}
+    assert r.get_json()['avaliacao'] == {'sessao_id': realizada, 'nota': 5, 'publica': True}
     assert paciente.post(url, json={'nota': 3}).status_code == 409
-    assert paciente.post(f'/api/consultas/{realizada2}/avaliacao', json={'nota': 4}).status_code == 201
+    # Logo depois da videochamada a sessao paga ainda e CONFIRMADO: ja pode avaliar. Privada por padrao
+    realizada2 = nova_sessao(sessoes, 'CONFIRMADO', datetime(2026, 9, 2, 10), datetime(2026, 9, 2, 11))
+    r = paciente.post(f'/api/consultas/{realizada2}/avaliacao', json={'nota': 4, 'comentario': 'so para voce'})
+    assert r.status_code == 201 and r.get_json()['avaliacao']['publica'] is False, r.get_json()
+
+    # No perfil so o comentario publico, sem quem escreveu
+    publicas = anonimo.get(f'/api/profissionais/{PROFISSIONAL}/avaliacoes').get_json()['avaliacoes']
+    assert [(a['nota'], a['comentario']) for a in publicas] == [(5, '“ótima” – recomendo 😊')], publicas
+    assert set(publicas[0]) == {'nota', 'comentario', 'criado_em'}, publicas
+    # O profissional le os dois na lista de consultas
+    dele = {c['sessao_id']: c for c in profissional.get('/api/consultas/').get_json()['consultas']}
+    assert (dele[realizada2]['comentario_avaliacao'], dele[realizada2]['avaliacao_publica']) == ('so para voce', False)
 
     p = busca()[1][PROFISSIONAL]
     assert p['avaliacao'] == 4.5 and isinstance(p['avaliacao'], float) and p['total_avaliacoes'] == 2, p

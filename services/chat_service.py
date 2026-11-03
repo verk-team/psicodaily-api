@@ -12,7 +12,10 @@ MAXIMO_TEXTO = 2000
 MAXIMO_ARQUIVO = 10 * 1024 * 1024
 # O tipo vem dos primeiros bytes, nao do nome nem do Content-Type que o cliente manda
 ASSINATURAS = {b'%PDF-': ('application/pdf', '.pdf'), b'\x89PNG\r\n\x1a\n': ('image/png', '.png'),
-               b'\xff\xd8\xff': ('image/jpeg', '.jpg')}
+               b'\xff\xd8\xff': ('image/jpeg', '.jpg'),
+               # Audio: OGG (WhatsApp), WebM (gravador do Chrome/Firefox), MP3 com e sem etiqueta ID3
+               b'OggS': ('audio/ogg', '.ogg'), b'\x1aE\xdf\xa3': ('audio/webm', '.webm'),
+               b'ID3': ('audio/mpeg', '.mp3'), b'\xff\xfb': ('audio/mpeg', '.mp3'), b'\xff\xf3': ('audio/mpeg', '.mp3')}
 VALIDADE_URL = 300
 COLUNAS = 'MENSAGEM_ID, REMETENTE_ID, TEXTO, LIDA, CRIADO_EM, ARQUIVO_NOME, ARQUIVO_TIPO, ARQUIVO_TAMANHO'
 
@@ -120,17 +123,23 @@ def enviar(usuario_id, papel, outro_id, dados):
     return _publicar(paciente_id, profissional_id, mensagem)
 
 
+def _tipo_do_arquivo(conteudo):
+    # M4A (iPhone, Safari) e um MP4: a marca 'ftyp' vem depois dos 4 bytes de tamanho, entao nao cabe em ASSINATURAS
+    if conteudo[4:8] == b'ftyp':
+        return 'audio/mp4', '.m4a'
+    return next((tipo for assinatura, tipo in ASSINATURAS.items() if conteudo.startswith(assinatura)), (None, None))
+
+
 def enviar_arquivo(usuario_id, papel, outro_id, nome, arquivo, texto=''):
-    """Anexo PDF, JPG ou PNG de ate 10 MB, com legenda opcional, no bucket privado (F6)."""
+    """Anexo PDF, JPG, PNG ou audio de ate 10 MB, com legenda opcional, no bucket privado (F6)."""
     if arquivo is None:
         raise ErroNegocio('Envie o arquivo no campo "arquivo"')
     conteudo = arquivo.read(MAXIMO_ARQUIVO + 1)
     if len(conteudo) > MAXIMO_ARQUIVO:
         raise ErroNegocio('O arquivo deve ter no maximo 10 MB', 413)
-    tipo, extensao = next((tipo for assinatura, tipo in ASSINATURAS.items() if conteudo.startswith(assinatura)),
-                          (None, None))
+    tipo, extensao = _tipo_do_arquivo(conteudo)
     if tipo is None:
-        raise ErroNegocio('Envie um arquivo PDF, JPG ou PNG')
+        raise ErroNegocio('Envie um arquivo PDF, JPG, PNG ou de áudio (MP3, M4A, OGG, WebM)')
     texto = _texto(texto or '', minimo=0)
     # Nome so para exibir: sem pastas do aparelho de quem enviou
     nome = (nome or '').replace('\\', '/').rsplit('/', 1)[-1].strip()[:200] or f'arquivo{extensao}'

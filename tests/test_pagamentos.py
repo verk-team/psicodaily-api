@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from apoio import PACIENTE, PROFISSIONAL, executar
-from services import notificacoes_service, pagamentos_service
+from services import consultas_service, notificacoes_service, pagamentos_service
 
 ID_PIX = 987654321
 ID_BOLETO = 987654322
@@ -150,3 +150,26 @@ def test_nao_cobra_cartao_se_o_pix_ja_foi_pago(arkhe, sessao, paciente):
 def test_pedido_invalido_nao_chama_a_arkhe(arkhe, sessao, paciente, corpo):
     assert paciente.post('/api/pagamentos/cobranca', json={'id_sessao': sessao, **corpo}).status_code == 400
     assert arkhe['chamadas'] == []
+
+
+def test_reserva_sem_pagamento_expira(arkhe, sessao, sessoes, paciente, profissional, ultima_notificacao):
+    inicio = executar('SELECT DATA_HORA_INICIO FROM SESSAO WHERE SESSAO_ID = ?', (sessao,))[0][0]
+    paga = executar('''INSERT INTO SESSAO (PACIENTE_ID, PROFISSIONAL_ID, DATA_HORA_INICIO, DATA_HORA_FIM, STATUS,
+        VALOR_CENTAVOS) VALUES (?, ?, ?, ?, 'AGENDADO', 15000) RETURNING SESSAO_ID''',
+                    (PACIENTE, PROFISSIONAL, inicio + timedelta(hours=2), inicio + timedelta(hours=3)))[0][0]
+    sessoes.append(paga)
+    assert paciente.post('/api/pagamentos/cobranca', json={'id_sessao': paga}).status_code == 201
+    arkhe['status'][ID_PIX] = 1  # pago na Arkhé sem ninguem abrir a tela de pagamento
+    # CRIADO_EM em 2000 separa estas duas das outras sessoes do banco
+    criada = datetime(2000, 1, 1)
+    executar('UPDATE SESSAO SET CRIADO_EM = ? WHERE SESSAO_ID IN (?, ?)', (criada, sessao, paga))
+
+    assert consultas_service.expirar_reservas(criada + timedelta(minutes=29)) == 0
+    assert consultas_service.expirar_reservas(criada + timedelta(minutes=31)) == 1
+    status = dict(executar('SELECT SESSAO_ID, STATUS FROM SESSAO WHERE SESSAO_ID IN (?, ?)', (sessao, paga)))
+    assert status == {sessao: 'CANCELADO', paga: 'CONFIRMADO'}, status
+    avisos = executar('SELECT USUARIO_ID, TITULO FROM NOTIFICACAO WHERE NOTIFICACAO_ID > ?', (ultima_notificacao,))
+    assert (PACIENTE, 'Reserva cancelada') in avisos and (PROFISSIONAL, 'Nova consulta confirmada') in avisos, avisos
+    # A sessao expirada nao aceita mais pagamento
+    r = paciente.post('/api/pagamentos/cobranca', json={'id_sessao': sessao})
+    assert r.status_code == 409 and r.get_json()['cancelada'] is True, r.get_json()

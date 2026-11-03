@@ -40,10 +40,10 @@ def conectar(servidor):
             pass
 
 
-def nova_sessao(sessoes, inicio, fim):
+def nova_sessao(sessoes, inicio, fim, status='CONFIRMADO'):
     sessao_id = executar('''INSERT INTO SESSAO (PACIENTE_ID, PROFISSIONAL_ID, DATA_HORA_INICIO, DATA_HORA_FIM,
-        STATUS, VALOR_CENTAVOS) VALUES (?, ?, ?, ?, 'AGENDADO', 100) RETURNING SESSAO_ID''',
-                         (PACIENTE, PROFISSIONAL, inicio, fim))[0][0]
+        STATUS, VALOR_CENTAVOS) VALUES (?, ?, ?, ?, ?, 100) RETURNING SESSAO_ID''',
+                         (PACIENTE, PROFISSIONAL, inicio, fim, status))[0][0]
     sessoes.append(sessao_id)
     return sessao_id
 
@@ -125,6 +125,9 @@ def test_ice_servers(paciente, outro_paciente, sessoes, monkeypatch):
 
     # Quem nao participa nao gasta a cota do TURN
     assert outro_paciente.get(rota).status_code == 404
+    # Consulta sem pagamento nao abre sala
+    sem_pagamento = nova_sessao(sessoes, agora + timedelta(minutes=5), agora + timedelta(minutes=50), 'AGENDADO')
+    assert paciente.get(f'/api/consultas/{sem_pagamento}/ice-servers').status_code == 404
 
     # Sem chave da Cloudflare (dev, CI): so STUN
     monkeypatch.delenv('TURN_KEY_ID', raising=False)

@@ -24,7 +24,7 @@ def enviar_lembretes(agora=None):
         for coluna, de, ate in LEMBRETES:
             cur.execute(f'''SELECT s.SESSAO_ID, s.PACIENTE_ID, s.PROFISSIONAL_ID, s.DATA_HORA_INICIO, u.NOME
                 FROM SESSAO s JOIN USUARIO u ON u.ID_USUARIO = s.PROFISSIONAL_ID
-                WHERE s.STATUS IN ('AGENDADO', 'CONFIRMADO') AND s.{coluna} IS NULL
+                WHERE s.STATUS = 'CONFIRMADO' AND s.{coluna} IS NULL
                   AND s.DATA_HORA_INICIO > ? AND s.DATA_HORA_INICIO <= ?''', (agora + ate, agora + de))
             for sessao_id, paciente_id, profissional_id, inicio, profissional in cur.fetchall():
                 cur.execute(f'''UPDATE SESSAO SET {coluna} = CURRENT_TIMESTAMP
@@ -53,6 +53,10 @@ def _rodar():
         except Exception:
             logger.exception('Falha ao enviar lembretes')
         try:
+            consultas_service.expirar_reservas()
+        except Exception:
+            logger.exception('Falha ao expirar as reservas sem pagamento')
+        try:
             assinaturas_service.processar()
         except Exception:
             logger.exception('Falha ao processar as assinaturas')
@@ -60,5 +64,5 @@ def _rodar():
 
 
 def iniciar():
-    """Thread do processo unico (F7): lembretes e assinaturas. Um cron job do Northflank nao montaria o volume do banco."""
+    """Thread do processo unico (F7): lembretes, reservas sem pagamento e assinaturas. Um cron job do Northflank nao montaria o volume do banco."""
     threading.Thread(target=_rodar, name='lembretes', daemon=True).start()
