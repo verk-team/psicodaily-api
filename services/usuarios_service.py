@@ -1,3 +1,5 @@
+import logging
+
 from database.db import transacao
 from funcao import (obter_campo, somente_digitos, validar_cpf, validar_email, validar_imagem_usuario,
                     validar_nome, validar_senha, validar_telefone)
@@ -8,12 +10,21 @@ from services.erros import ErroNegocio
 from services.upload_service import upload_service
 
 CAMPOS_PERFIL = {"nome": "NOME", "email": "EMAIL", "telefone": "TELEFONE", "cpf": "CPF"}
+logger = logging.getLogger(__name__)
 
 
 def salvar_imagem_usuario(imagem, id_usuario):
     if not imagem or not imagem.filename:
         return
     upload_service.upload_file(imagem.stream, id_usuario)
+
+
+def salvar_foto_do_cadastro(imagem, id_usuario):
+    """Depois do commit do cadastro: a foto e opcional, entao falha nela nao desfaz a conta (troca-se em Preferencias)."""
+    try:
+        salvar_imagem_usuario(imagem, id_usuario)
+    except ErroNegocio as erro:
+        logger.warning('Cadastro %s sem foto: %s', id_usuario, erro.mensagem)
 
 
 def criar_usuario_base(cur, formulario, imagem, usuario_role, exigir_confirmacao_senha=False):
@@ -60,7 +71,6 @@ def criar_usuario_base(cur, formulario, imagem, usuario_role, exigir_confirmacao
         raise RuntimeError("Banco nao retornou o usuario criado")
 
     id_usuario = usuario_criado[0]
-    salvar_imagem_usuario(imagem, id_usuario)
     return {"id_usuario": id_usuario, "email": email, "codigo": codigo, "nome": nome}
 
 
@@ -71,6 +81,7 @@ def enviar_ativacao(usuario):
 def cadastrar_paciente(formulario, imagem):
     with transacao() as cur:
         usuario = criar_usuario_base(cur, formulario, imagem, 'PACIENTE', exigir_confirmacao_senha=True)
+    salvar_foto_do_cadastro(imagem, usuario["id_usuario"])
     enviar_ativacao(usuario)
     return usuario
 

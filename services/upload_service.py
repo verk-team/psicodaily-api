@@ -1,11 +1,16 @@
 from dotenv import load_dotenv
 from io import BytesIO
-from PIL import Image, ImageOps
+from botocore.exceptions import BotoCoreError, ClientError
+from PIL import Image, ImageOps, UnidentifiedImageError
 from urllib.parse import quote
 import boto3
+import logging
 import os
 
+from services.erros import ErroNegocio
+
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 # O r2.dev não redimensiona pela URL, então a foto já sobe no tamanho de exibição.
 TAMANHO_MAXIMO_FOTO = (512, 512)
@@ -28,25 +33,34 @@ class UploadService():
 		upload_name = f"usuarios/{id_usuario}.jpg"
 
 		# Reabrir com o Pillow também garante que o arquivo é mesmo uma imagem.
-		foto = ImageOps.exif_transpose(Image.open(imagem)).convert('RGB')
+		try:
+			foto = ImageOps.exif_transpose(Image.open(imagem)).convert('RGB')
+		except (UnidentifiedImageError, OSError):
+			raise ErroNegocio('Não foi possível ler a imagem; envie outra foto JPG')
 		foto.thumbnail(TAMANHO_MAXIMO_FOTO)
 		arquivo = BytesIO()
 		foto.save(arquivo, 'JPEG', quality=85, optimize=True)
 		arquivo.seek(0)
 
-		self.s3.upload_fileobj(arquivo, 'psicodaily', upload_name, ExtraArgs={
+		self._enviar(arquivo, 'psicodaily', upload_name, {
 			'ContentType': 'image/jpeg',
 			# A chave não muda ao trocar a foto, então o navegador revalida pelo ETag.
 			'CacheControl': 'no-cache',
 		})
 
-		print(f"uploaded {upload_name}")
-
 	def url_foto_usuario(self, id_usuario):
 		return f"{self.url_publica}/usuarios/{id_usuario}.jpg"
 
 	def enviar_privado(self, conteudo, chave, tipo):
-		self.s3.upload_fileobj(BytesIO(conteudo), self.bucket_privado, chave, ExtraArgs={'ContentType': tipo})
+		self._enviar(BytesIO(conteudo), self.bucket_privado, chave, {'ContentType': tipo})
+
+	def _enviar(self, arquivo, bucket, chave, extras):
+		try:
+			self.s3.upload_fileobj(arquivo, bucket, chave, ExtraArgs=extras)
+		except (BotoCoreError, ClientError):
+			# Chave sem permissao de escrita (AccessDenied) ou ENDPOINT_URL ausente: o log diz qual; o usuario so tenta depois
+			logger.exception('Upload para o R2 falhou: %s/%s', bucket, chave)
+			raise ErroNegocio('Não foi possível enviar o arquivo agora. Tente novamente em alguns minutos.', 503)
 
 	def url_assinada(self, chave, nome, tipo, segundos):
 		"""URL de download que expira; gerada localmente, sem chamar o R2."""

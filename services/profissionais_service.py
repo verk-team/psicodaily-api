@@ -23,7 +23,7 @@ from funcao import (
 from services import assinaturas_service, disponibilidade_service, preferencias_service
 from services.erros import ErroNegocio
 from services.upload_service import upload_service
-from services.usuarios_service import criar_usuario_base, enviar_ativacao
+from services.usuarios_service import criar_usuario_base, enviar_ativacao, salvar_foto_do_cadastro
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +318,19 @@ def detalhe(id_profissional):
 	return profissional
 
 
+MAXIMO_AVALIACOES_PUBLICAS = 20
+
+
+def avaliacoes_publicas(id_profissional):
+	"""Comentarios que o paciente marcou como publicos, mais recentes primeiro. Sem o nome: dado de saude mental."""
+	with transacao() as cur:
+		cur.execute(f'''SELECT FIRST {MAXIMO_AVALIACOES_PUBLICAS} NOTA, COMENTARIO, CRIADO_EM FROM AVALIACAO
+			WHERE PROFISSIONAL_ID = ? AND PUBLICA = TRUE AND COMENTARIO IS NOT NULL
+			ORDER BY CRIADO_EM DESC, AVALIACAO_ID DESC''', (id_profissional,))
+		return [{'nota': nota, 'comentario': comentario, 'criado_em': criado_em.isoformat()}
+				for nota, comentario, criado_em in cur.fetchall()]
+
+
 def _contar_visita(id_profissional):
 	"""Visualizacoes do perfil (plano Profissional). Melhor esforco, em transacao propria: duas visitas ao mesmo
 	tempo podem dar conflito de update no Firebird, e perder uma contagem nao pode derrubar o perfil.
@@ -458,6 +471,7 @@ def cadastrar(formulario, imagem):
 					tuple(colunas.values()))
 		disponibilidade_service.gravar(cur, usuario["id_usuario"], disponibilidade_service.janelas_do_cadastro(dias_atendimento))
 		assinaturas_service.iniciar_gratis(cur, usuario["id_usuario"])
+	salvar_foto_do_cadastro(imagem, usuario["id_usuario"])
 	enviar_ativacao(usuario)
 
 	return {

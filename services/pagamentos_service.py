@@ -151,7 +151,8 @@ def criar_cobranca(paciente_id, papel, dados):
         raise ErroNegocio('Sessao nao encontrada', 404)
     status_sessao, centavos, profissional_id, inicio, cpf = sessao
     if status_sessao == 'CANCELADO':
-        raise ErroNegocio('Nao e possivel pagar uma sessao cancelada')
+        # `cancelada` diz ao front que a reserva expirou (ou foi cancelada) e que e preciso escolher o horario de novo
+        raise ErroNegocio('Esta consulta foi cancelada e nao aceita pagamento', 409, cancelada=True)
     if any(status == 'PAGO' for _, status in pagamentos):
         raise ErroNegocio('Esta sessao ja foi paga', 409)
 
@@ -274,13 +275,22 @@ def _confirmar(metodo, id_cobranca, sessao_id, profissional_id, inicio):
                     (metodo, id_cobranca))
         if cur.fetchone()[0] is None:
             return  # outra requisicao confirmou antes
-        cur.execute('SELECT STATUS FROM SESSAO WHERE SESSAO_ID = ?', (sessao_id,))
-        if cur.fetchone()[0] == 'CANCELADO':
-            # A Arkhé nao cancela cobranca: pago depois do cancelamento, o valor volta para o paciente
-            registrar_reembolso(cur, sessao_id)
-            return
         emails = _sessao_paga(cur, sessao_id, profissional_id, inicio, metodo, id_cobranca)
     notificacoes_service.enviar_emails(emails)
+
+
+def confirmar_pendentes(sessao_id):
+    """Confere na Arkhé as cobranças pendentes da sessão e confirma as pagas. True se alguma estava paga."""
+    with transacao() as cur:
+        cur.execute('''SELECT p.METODO, p.ID_COBRANCA_ARKHE, s.PROFISSIONAL_ID, s.DATA_HORA_INICIO
+            FROM PAGAMENTO p JOIN SESSAO s ON s.SESSAO_ID = p.SESSAO_ID
+            WHERE p.SESSAO_ID = ? AND p.STATUS = 'PENDENTE' ''', (sessao_id,))
+        pendentes = cur.fetchall()
+    pagas = [(metodo, id_cobranca, profissional_id, inicio) for metodo, id_cobranca, profissional_id, inicio in pendentes
+             if consultar_arkhe(metodo, id_cobranca)['status'] == 1]
+    for metodo, id_cobranca, profissional_id, inicio in pagas:
+        _confirmar(metodo, id_cobranca, sessao_id, profissional_id, inicio)
+    return bool(pagas)
 
 
 def registrar_reembolso(cur, sessao_id):
@@ -316,15 +326,23 @@ def pix_saida(cpf, centavos, chave):
 
 def _sessao_paga(cur, sessao_id, profissional_id, inicio, metodo, id_arkhe):
     """Confirma a sessao e devolve os avisos: ao profissional e o comprovante ao paciente (13)."""
+    # O lock espera um cancelamento em andamento (paciente ou reserva expirando) terminar antes de decidir
+    cur.execute('SELECT STATUS, PACIENTE_ID, VALOR_CENTAVOS FROM SESSAO WHERE SESSAO_ID = ? WITH LOCK', (sessao_id,))
+    status, paciente_id, centavos = cur.fetchone()
+    if status == 'CANCELADO':
+        # Pago depois do cancelamento (ou da reserva expirar): a Arkhé nao cancela cobranca, entao o valor volta
+        registrar_reembolso(cur, sessao_id)
+        return []
     cur.execute("UPDATE SESSAO SET STATUS = 'CONFIRMADO' WHERE SESSAO_ID = ? AND STATUS = 'AGENDADO'", (sessao_id,))
-    cur.execute('SELECT PACIENTE_ID, VALOR_CENTAVOS FROM SESSAO WHERE SESSAO_ID = ?', (sessao_id,))
-    paciente_id, centavos = cur.fetchone()
+    cur.execute('SELECT NOME FROM USUARIO WHERE ID_USUARIO = ?', (paciente_id,))
+    nome_paciente = cur.fetchone()[0]
     quando = inicio.strftime("%d/%m/%Y às %H:%M")
     valor = f'R$ {centavos / 100:.2f}'.replace('.', ',')
     dados = {'sessao_id': sessao_id}
     return [
-        notificacoes_service.notificar(cur, profissional_id, 'PAGAMENTO_CONFIRMADO', 'Pagamento confirmado',
-                                       f'O paciente pagou a sessão de {quando}.', dados),
+        # So aqui o profissional fica sabendo: consulta sem pagamento nao conta como marcada
+        notificacoes_service.notificar(cur, profissional_id, 'PAGAMENTO_CONFIRMADO', 'Nova consulta confirmada',
+                                       f'{nome_paciente} pagou a consulta de {quando}.', dados),
         notificacoes_service.notificar(cur, paciente_id, 'PAGAMENTO_RECEBIDO', 'Comprovante de pagamento',
                                        f'Recebemos {valor} por {metodo.lower()} pela consulta de {quando}, '
                                        f'que está confirmada. Comprovante Arkhé nº {id_arkhe}.', dados),

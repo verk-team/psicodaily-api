@@ -73,6 +73,7 @@ def test_profissionais(anonimo, paciente, profissional):
     checar(anonimo.get('/api/profissionais/?especialidade=x'), 400, 'error')
     checar(anonimo.get(f'/api/profissionais/{PROFISSIONAL}'), 200, 'profissionais')
     checar(anonimo.get('/api/profissionais/999999'), 404, 'error')
+    checar(anonimo.get(f'/api/profissionais/{PROFISSIONAL}/avaliacoes'), 200, 'avaliacoes')
     checar(anonimo.post('/api/profissionais/', data={}), 400, 'error')
     checar(paciente.patch('/api/profissionais/me', json={'descricao': 'x' * 20}), 403, 'error')
     checar(profissional.patch('/api/profissionais/me', json={'foo': 1}), 400, 'error')

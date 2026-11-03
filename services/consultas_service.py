@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 MENSAGEM_CONFLITO = 'Profissional ou paciente ja possui consulta nesse horario'
 # 24: o paciente cancela com reembolso integral ate 15 min antes; depois disso nao cancela mais
 ANTECEDENCIA_CANCELAMENTO = timedelta(minutes=15)
+# A consulta so vale paga: sem pagamento, o horario fica reservado por este tempo e depois volta a ficar livre
+RESERVA_SEM_PAGAMENTO = timedelta(minutes=30)
 
 
 def serializar_sessao(colunas, linha):
@@ -80,7 +82,9 @@ def listar(usuario_id, papel):
                    r.HUMOR AS ULTIMO_HUMOR,
                    r.QUALIDADE_SONO AS ULTIMA_QUALIDADE_SONO,
                    r.CRIADO_EM AS ULTIMO_REGISTRO_EM,
-                   av.NOTA AS NOTA_AVALIACAO
+                   av.NOTA AS NOTA_AVALIACAO,
+                   av.COMENTARIO AS COMENTARIO_AVALIACAO,
+                   COALESCE(av.PUBLICA, FALSE) AS AVALIACAO_PUBLICA
             FROM SESSAO s
             INNER JOIN PROFISSIONAL p ON p.USUARIO_ID = s.PROFISSIONAL_ID
             INNER JOIN USUARIO u ON u.ID_USUARIO = p.USUARIO_ID
@@ -158,19 +162,52 @@ def agendar(paciente_id, papel, data):
         sessao = _sessao_retornada(cur)
         auditar(cur, paciente_id, 'SESSAO_AGENDADA', 'SESSAO', sessao['sessao_id'])
         quando = inicio.strftime('%d/%m/%Y às %H:%M')
-        cur.execute('SELECT NOME FROM USUARIO WHERE ID_USUARIO = ?', (paciente_id,))
-        nome_paciente = cur.fetchone()[0]
-        dados = {'sessao_id': sessao['sessao_id']}
-        emails = [
-            notificacoes_service.notificar(
-                cur, paciente_id, 'SESSAO_AGENDADA', 'Consulta agendada',
-                f'Sua consulta de {quando} foi agendada. Pague pela tela da consulta para confirmá-la. '
-                f'No horário, entre pela sala: {url_sala(sessao["sessao_id"])}', dados),
-            notificacoes_service.notificar(cur, id_profissional, 'SESSAO_AGENDADA', 'Nova consulta',
-                                           f'{nome_paciente} agendou uma consulta para {quando}.', dados),
-        ]
+        minutos = int(RESERVA_SEM_PAGAMENTO.total_seconds() // 60)
+        # O profissional so fica sabendo quando o pagamento confirma (pagamentos_service._sessao_paga)
+        emails = [notificacoes_service.notificar(
+            cur, paciente_id, 'SESSAO_AGENDADA', 'Horário reservado',
+            f'Reservamos o horário de {quando} por {minutos} minutos. A consulta só é confirmada com o pagamento; '
+            f'sem ele, a reserva é cancelada.', {'sessao_id': sessao['sessao_id']})]
     notificacoes_service.enviar_emails(emails)
     return sessao
+
+
+def expirar_reservas(agora=None):
+    """Job: cancela as consultas futuras que nao foram pagas a tempo e libera o horario. Devolve quantas cancelou."""
+    agora = agora or datetime.now()
+    with transacao() as cur:
+        cur.execute('''SELECT SESSAO_ID FROM SESSAO
+            WHERE STATUS = 'AGENDADO' AND CRIADO_EM <= ? AND DATA_HORA_INICIO > ?''',
+                    (agora - RESERVA_SEM_PAGAMENTO, agora))
+        reservas = [linha[0] for linha in cur.fetchall()]
+    canceladas = 0
+    for sessao_id in reservas:
+        try:
+            # Pix ou boleto pago sem ninguem abrir a tela de pagamento: confirma em vez de cancelar
+            if pagamentos_service.confirmar_pendentes(sessao_id):
+                continue
+            canceladas += _cancelar_reserva(sessao_id)
+        except Exception:
+            # Arkhé fora do ar: na duvida nao cancela; o job tenta de novo no proximo minuto
+            logger.exception('Falha ao expirar a reserva %s', sessao_id)
+    return canceladas
+
+
+def _cancelar_reserva(sessao_id):
+    with transacao() as cur:
+        cur.execute('''UPDATE SESSAO SET STATUS = 'CANCELADO' WHERE SESSAO_ID = ? AND STATUS = 'AGENDADO'
+            RETURNING PACIENTE_ID, PROFISSIONAL_ID, DATA_HORA_INICIO, DATA_HORA_FIM''', (sessao_id,))
+        paciente_id, profissional_id, inicio, fim = cur.fetchone()
+        if paciente_id is None:
+            return 0  # pago ou cancelado entre a busca e aqui
+        minutos = int(RESERVA_SEM_PAGAMENTO.total_seconds() // 60)
+        emails = lista_espera_service.avisar_vaga(cur, profissional_id, inicio, fim, paciente_id)
+        emails.append(notificacoes_service.notificar(
+            cur, paciente_id, 'SESSAO_CANCELADA', 'Reserva cancelada',
+            f'A reserva da consulta de {inicio.strftime("%d/%m/%Y às %H:%M")} foi cancelada porque o pagamento '
+            f'não foi concluído em {minutos} minutos. Se ainda quiser o horário, agende de novo.', {'sessao_id': sessao_id}))
+    notificacoes_service.enviar_emails(emails)
+    return 1
 
 
 def _ler_link(link):
@@ -319,11 +356,15 @@ def _ao_cancelar(cur, sessao_id, profissional_id, paciente_id, inicio, fim, avis
 def avaliar(paciente_id, papel, sessao_id, dados):
     if papel != 'PACIENTE' or not paciente_id:
         raise ErroNegocio('Somente o paciente pode avaliar a sessao', 403)
-    if not isinstance(dados, dict) or set(dados) - {'nota', 'comentario'}:
-        raise ErroNegocio('Envie apenas nota e comentario')
+    if not isinstance(dados, dict) or set(dados) - {'nota', 'comentario', 'publica'}:
+        raise ErroNegocio('Envie apenas nota, comentario e publica')
     nota = dados.get('nota')
     if type(nota) is not int or not 1 <= nota <= 5:
         raise ErroNegocio('nota deve ser inteiro entre 1 e 5')
+    # Privada por padrao: o comentario publico aparece no perfil do profissional, sem o nome do paciente
+    publica = dados.get('publica', False)
+    if not isinstance(publica, bool):
+        raise ErroNegocio('publica deve ser true ou false')
     comentario = dados.get('comentario')
     if comentario is not None:
         if not isinstance(comentario, str) or len(comentario.strip()) > 500:
@@ -332,20 +373,21 @@ def avaliar(paciente_id, papel, sessao_id, dados):
 
     try:
         with transacao() as cur:
-            cur.execute('SELECT PROFISSIONAL_ID, STATUS FROM SESSAO WHERE SESSAO_ID = ? AND PACIENTE_ID = ?',
-                        (sessao_id, paciente_id))
+            cur.execute('''SELECT PROFISSIONAL_ID, STATUS, DATA_HORA_INICIO FROM SESSAO
+                WHERE SESSAO_ID = ? AND PACIENTE_ID = ?''', (sessao_id, paciente_id))
             sessao = cur.fetchone()
             if sessao is None:
                 raise ErroNegocio('Sessao nao encontrada', 404)
-            if sessao[1] != 'REALIZADO':
-                raise ErroNegocio('Só é possível avaliar sessões realizadas', 409)
-            cur.execute('''INSERT INTO AVALIACAO (SESSAO_ID, PACIENTE_ID, PROFISSIONAL_ID, NOTA, COMENTARIO)
-                VALUES (?, ?, ?, ?, ?)''', (sessao_id, paciente_id, sessao[0], nota, comentario))
+            # Logo ao sair da videochamada a sessao ainda e CONFIRMADO: o profissional so marca REALIZADO depois do fim
+            if sessao[1] not in ('CONFIRMADO', 'REALIZADO') or sessao[2] > datetime.now():
+                raise ErroNegocio('Só é possível avaliar consultas pagas que já começaram', 409)
+            cur.execute('''INSERT INTO AVALIACAO (SESSAO_ID, PACIENTE_ID, PROFISSIONAL_ID, NOTA, COMENTARIO, PUBLICA)
+                VALUES (?, ?, ?, ?, ?, ?)''', (sessao_id, paciente_id, sessao[0], nota, comentario, publica))
     except fdb.DatabaseError as erro:
         if 'UQ_AVALIACAO_SESSAO' in str(erro):
             raise ErroNegocio('Sessão já avaliada', 409)
         raise
-    return {'sessao_id': sessao_id, 'nota': nota}
+    return {'sessao_id': sessao_id, 'nota': nota, 'publica': publica}
 
 
 def sala_da_sessao(id_usuario, sessao_id):
@@ -367,7 +409,8 @@ def sala_da_sessao(id_usuario, sessao_id):
     participantes = {linha[0]: {'id_usuario': linha[0], 'nome': linha[1], 'email': linha[2]}
                      for linha in (sessao[3:6], sessao[6:9])}
     agora = datetime.now()
-    if (id_usuario not in participantes or status == 'CANCELADO'
+    # Sala so para consulta paga; REALIZADO ja passou do fim
+    if (id_usuario not in participantes or status != 'CONFIRMADO'
             or inicio > agora.replace(second=0, microsecond=0) + timedelta(minutes=15) or fim < agora):
         return None
     return {'sessao_id': sessao_id, 'inicio': inicio, 'participantes': participantes}

@@ -28,11 +28,11 @@ def waha(monkeypatch):
 
 @pytest.fixture
 def sessao_futura(sessoes):
-    def criar(horas):
+    def criar(horas, status='AGENDADO'):
         inicio = (datetime.now() + timedelta(hours=horas)).replace(second=0, microsecond=0)
         sid = executar('''INSERT INTO SESSAO (PACIENTE_ID, PROFISSIONAL_ID, DATA_HORA_INICIO, DATA_HORA_FIM, STATUS,
-            VALOR_CENTAVOS) VALUES (?, ?, ?, ?, 'AGENDADO', 15000) RETURNING SESSAO_ID''',
-                       (PACIENTE, PROFISSIONAL, inicio, inicio + timedelta(hours=1)))[0][0]
+            VALOR_CENTAVOS) VALUES (?, ?, ?, ?, ?, 15000) RETURNING SESSAO_ID''',
+                       (PACIENTE, PROFISSIONAL, inicio, inicio + timedelta(hours=1), status))[0][0]
         sessoes.append(sid)
         return sid
     return criar
@@ -110,11 +110,13 @@ def test_cancela_pelo_whatsapp_com_sim(waha, sessao_futura, monkeypatch, ultima_
 
 
 def test_lembretes_24h_e_1h_uma_vez_so(waha, sessao_futura, ultima_notificacao):
-    amanha, daqui_meia_hora = sessao_futura(20), sessao_futura(0.5)
+    amanha, daqui_meia_hora = sessao_futura(20, 'CONFIRMADO'), sessao_futura(0.5, 'CONFIRMADO')
+    sem_pagamento = sessao_futura(3)  # so consulta paga recebe lembrete
     lembretes_service.enviar_lembretes()
     marcados = {sid: (h24 is not None, h1 is not None) for sid, h24, h1 in executar(
-        'SELECT SESSAO_ID, LEMBRETE_24H_EM, LEMBRETE_1H_EM FROM SESSAO WHERE SESSAO_ID IN (?, ?)', (amanha, daqui_meia_hora))}
-    assert marcados == {amanha: (True, False), daqui_meia_hora: (False, True)}
+        'SELECT SESSAO_ID, LEMBRETE_24H_EM, LEMBRETE_1H_EM FROM SESSAO WHERE SESSAO_ID IN (?, ?, ?)',
+        (amanha, daqui_meia_hora, sem_pagamento))}
+    assert marcados == {amanha: (True, False), daqui_meia_hora: (False, True), sem_pagamento: (False, False)}
     avisos = executar('''SELECT USUARIO_ID FROM NOTIFICACAO WHERE NOTIFICACAO_ID > ? AND TIPO = 'LEMBRETE_CONSULTA'
         ''', (ultima_notificacao,))
     assert sorted(avisos) == sorted([(PACIENTE,), (PROFISSIONAL,)] * 2)
