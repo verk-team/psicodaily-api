@@ -15,8 +15,9 @@ logger = logging.getLogger(__name__)
 # Gemini no plano gratuito, pelo endpoint no formato da OpenAI (trocado do Groq em 22/10/2026, que era lento).
 # Outro provedor compativel = trocar URL, modelo e a variavel da chave.
 URL_LLM = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
-# 3.5 Flash: ~1,3 s por rodada com ferramentas em 22/10/2026; o 3.8 nao aceita 'minimal' e vivia sobrecarregado (503)
-MODELO = 'gemini-3.5-flash'
+# Flash-lite: o 3.5 Flash gratis so da 20 requisicoes por dia (03/11/2026), e cada pergunta gasta de 1 a 3;
+# o 3.8 nao aceita 'minimal' e vivia sobrecarregado (503)
+MODELO = 'gemini-3.5-flash-lite'
 MAXIMO_MENSAGENS = 40
 MAXIMO_CARACTERES = 2000
 MAXIMO_RODADAS = 8
@@ -27,7 +28,7 @@ ERROS_PASSAGEIROS = {429, 500, 503, 504}
 INDISPONIVEL = 'O assistente está indisponível no momento. Tente novamente em instantes.'
 ESPERAS_NOVA_TENTATIVA = (2, 5)
 
-SISTEMA = '''Voce e o assistente virtual do PsicoDaily, plataforma que conecta pacientes a psicologos e psiquiatras.
+SISTEMA = '''Voce e o assistente virtual do PsicoDaily chamado Psicosinho (sempre comece se apresentando caso o user cumprimente), plataforma que conecta pacientes a psicologos e psiquiatras.
 Fale em portugues do Brasil, com tom profissional, cordial e objetivo, como o atendimento de uma clinica:
 - trate o paciente por "voce", sem girias, sem emojis e sem exclamacoes em excesso;
 - responda em ate 4 frases curtas ou numa lista; com varios profissionais ou horarios, use uma lista com um item por linha;
