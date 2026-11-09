@@ -1,3 +1,12 @@
+"""O dinheiro do profissional e as saídas que o admin paga.
+
+Termos:
+- líquido: o que sobra para o profissional de um pagamento (valor - taxa da plataforma - taxa do cartão).
+- repasse: o admin junta o líquido das consultas já realizadas de um profissional e paga de uma vez.
+- reembolso: a devolução ao paciente quando uma consulta paga é cancelada.
+Repasse e reembolso são pagos por Pix de saída da Arkhé para a chave CPF de quem recebe, ou marcados como
+pagos à mão quando o admin pagou por fora.
+"""
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -42,13 +51,16 @@ def liquido(valor, taxa_arkhe, percentual):
     """(taxa da plataforma, liquido do profissional) de um pagamento, em centavos.
 
     `percentual` e o gravado no pagamento; a taxa do cartao da Arkhé tambem sai do profissional."""
+    # Pagamento antigo, de antes de a taxa ser gravada
     if percentual is None:
         percentual = planos_service.TAXA_PAGAMENTO_ANTIGO
+    # Decimal faz a conta sem erro de arredondamento; ROUND_HALF_UP arredonda 0,5 centavo para cima
     taxa_plataforma = int((Decimal(valor) * percentual / 100).quantize(Decimal('1'), ROUND_HALF_UP))
     return taxa_plataforma, valor - taxa_plataforma - (taxa_arkhe or 0)
 
 
 def _situacao(status_sessao, reembolsado, status_repasse):
+    """Em que pé está o dinheiro de um pagamento, do ponto de vista do profissional."""
     if reembolsado:
         return 'REEMBOLSADO'
     if status_repasse:
@@ -57,6 +69,7 @@ def _situacao(status_sessao, reembolsado, status_repasse):
 
 
 def ganhos(profissional_id, papel, dias):
+    """Resumo do período (recebido, taxas, líquido), saldo por situação, consultas do período e repasses."""
     if papel not in ('PSICOLOGO', 'PSIQUIATRA'):
         raise ErroNegocio('Somente profissionais podem ver os ganhos', 403)
     if dias not in PERIODOS_DIAS:
@@ -64,7 +77,7 @@ def ganhos(profissional_id, papel, dias):
     inicio = datetime.combine(date.today() - timedelta(days=int(dias) - 1), datetime.min.time())
 
     with transacao() as cur:
-        # Todos os pagos (nao so os do periodo): o saldo a receber nao depende do filtro
+        # Todos os pagos (não só os do período): o saldo a receber não depende do filtro
         cur.execute('''SELECT p.SESSAO_ID, s.DATA_HORA_INICIO, s.STATUS, u.NOME, p.METODO, p.VALOR_CENTAVOS,
                 p.TAXA_ARKHE_CENTAVOS, p.TAXA_PLATAFORMA_PERCENTUAL, p.PAGO_EM, r.REEMBOLSO_ID, rp.STATUS
             FROM PAGAMENTO p
@@ -98,6 +111,7 @@ def ganhos(profissional_id, papel, dias):
         consultas.append(consulta)
         if pago_em >= inicio:
             do_periodo.append(consulta)
+    # O resumo do período não conta o que foi devolvido ao paciente
     validas = [c for c in do_periodo if c['situacao'] != 'REEMBOLSADO']
 
     def soma(lista, campo):
@@ -128,7 +142,11 @@ def ganhos(profissional_id, papel, dias):
 
 
 def fechar_repasses(admin_id):
-    """Cria um repasse PENDENTE por profissional com o liquido de tudo que ja pode ser repassado."""
+    """Cria um repasse PENDENTE por profissional com o liquido de tudo que ja pode ser repassado.
+
+    Para cada profissional: cria o repasse com valor 0, vincula a ele os pagamentos elegíveis e só então
+    calcula o valor a partir do que foi vinculado de verdade.
+    """
     with transacao() as cur:
         cur.execute(f'''SELECT DISTINCT s.PROFISSIONAL_ID FROM PAGAMENTO p JOIN SESSAO s ON s.SESSAO_ID = p.SESSAO_ID
             WHERE {ELEGIVEL_REPASSE.format(profissional='s.PROFISSIONAL_ID')}''')
@@ -158,6 +176,7 @@ def fechar_repasses(admin_id):
 
 
 def listar_repasses(status=None):
+    """Os 200 repasses mais recentes, com o profissional e quantas consultas cada um cobre."""
     status = _ler_status(status)
     with transacao() as cur:
         cur.execute(f'''SELECT FIRST 200 r.REPASSE_ID, r.STATUS, r.VALOR_CENTAVOS, r.CRIADO_EM, r.PAGO_EM,
@@ -183,6 +202,7 @@ def _ler_status(status):
 
 
 def _ler_manual(dados):
+    """{} = pagar pela Arkhé; {"manual": true} = só marcar como pago."""
     dados = {} if dados is None else dados
     if not isinstance(dados, dict) or set(dados) - {'manual'} or not isinstance(dados.get('manual', False), bool):
         raise ErroNegocio('Envie {} para pagar pela Arkhé ou {"manual": true} se ja pagou por fora')
@@ -202,10 +222,14 @@ def _pagar_saida(admin_id, tabela, registro_id, dados):
     if status == 'PAGO':
         raise ErroNegocio(f'{tabela.capitalize()} ja foi pago', 409)
 
-    movimentacao = None if manual else pagamentos_service.pix_saida(cpf, valor, f'psicodaily-{tabela.lower()}-{registro_id}')
+    # Chave de idempotência: um texto fixo por reembolso/repasse. Se o mesmo pedido chegar duas vezes,
+    # a Arkhé reconhece a chave (por 7 dias) e não paga de novo
+    chave = f'psicodaily-{tabela.lower()}-{registro_id}'
+    movimentacao = None if manual else pagamentos_service.pix_saida(cpf, valor, chave)
     with transacao() as cur:
         cur.execute(f'''UPDATE {tabela} SET STATUS = 'PAGO', PAGO_EM = CURRENT_TIMESTAMP, ID_MOVIMENTACAO_ARKHE = ?
             WHERE {tabela}_ID = ? AND STATUS = 'PENDENTE' RETURNING {tabela}_ID''', (movimentacao, registro_id))
+        # Outra requisição pagou entre a leitura e aqui (UPDATE ... RETURNING sem linha devolve NULLs)
         if cur.fetchone()[0] is None:
             raise ErroNegocio(f'{tabela.capitalize()} ja foi pago', 409)
         auditar(cur, admin_id, f'{tabela}_PAGO', tabela, registro_id)
@@ -218,6 +242,7 @@ def _pagar_saida(admin_id, tabela, registro_id, dados):
 
 
 def listar_reembolsos(status=None):
+    """Os 200 reembolsos mais recentes, com o paciente e a consulta."""
     status = _ler_status(status)
     with transacao() as cur:
         cur.execute(f'''SELECT FIRST 200 r.REEMBOLSO_ID, r.STATUS, r.VALOR_CENTAVOS, r.CRIADO_EM, r.PAGO_EM,
