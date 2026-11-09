@@ -26,8 +26,9 @@ psicodaily-front (Vercel / Vite :5173)
 | `app.py` | Cria o app, registra blueprints, `sock` (flask-sock), CORS (`config.ORIGENS_FRONT`, as mesmas que o handshake WS aceita) e os `errorhandler` (`ErroNegocio` → `{'error'}`; exceção inesperada → log + 500). |
 | `config.py` | `SECRET_KEY` do `.env`. |
 | `view/` | Rotas HTTP/WS, uma blueprint por domínio. Só leem o `request`, chamam o service e montam a resposta. |
-| `funcao.py` | Validadores e normalizadores puros (senha, CPF, e-mail, telefone, nome, imagem, conselho, valor, abordagem, modalidade). |
-| `util/usuarios.py` | Decorators `usuario_autenticado` / `profissional_autenticado`. |
+| `funcao.py` | Validadores e normalizadores puros (senha, CPF, e-mail, telefone, nome, imagem, conselho, valor, abordagem, modalidade) e os formatadores de mensagem `formatar_reais` e `formatar_data_hora`. |
+| `util/usuarios.py` | Decorators `usuario_autenticado` / `profissional_autenticado` / `admin_autenticado` e `origem_permitida()` dos WebSockets. |
+| `util/rotas.py` | `sem_cache` (`Cache-Control: private, no-store` nas respostas com dado pessoal) e `MAIOR_ID`, o `antes` padrão das listas paginadas. |
 | `services/` | Um `<dominio>_service.py` por blueprint (`auth`, `usuarios`, `registros`, `prontuario`, `profissionais`, `consultas`, `encaminhamentos`, `pagamentos`) com regras e SQL; `email_service` (SMTP + Jinja); `erros.py` (`ErroNegocio`); `upload_service` (R2 via boto3 + Pillow) e `signaling_service` (salas WebRTC). |
 | `database/` | `db.py` (pool, `transacao()`, `banco_responde()`), `migrations/` (schema versionado; `0001_inicial.sql` é o baseline de produção), `migrar.py` (aplica as pendentes), `seed.sql` (dados fictícios de dev e CI). O `BANCO.FDB` local (gitignored) é só de dev. |
 | `templates/` | `email_codigo.html` (Jinja) para códigos de ativação/recuperação. |
