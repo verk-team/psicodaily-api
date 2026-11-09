@@ -10,6 +10,11 @@ Conexao pelas mesmas variaveis do app (DB_HOST, DB_DATABASE, DB_USER, DB_PASSWOR
 Cada arquivo roda numa transacao so, junto com o registro em SCHEMA_MIGRATION:
 se um comando falha, nada daquele arquivo fica aplicado. Sai com codigo 1 em qualquer erro.
 """
+# Este texto de cima também é o --help do script (argparse usa o __doc__), por isso fica sem acento.
+#
+# Migration: um arquivo .sql numerado (0001_..., 0002_...) com uma mudança no schema do banco.
+# A tabela SCHEMA_MIGRATION guarda quais números já rodaram; assim cada arquivo roda uma vez só,
+# em qualquer banco (dev, CI, produção), e todos ficam com o mesmo schema.
 import argparse
 import os
 import re
@@ -20,7 +25,7 @@ from dotenv import load_dotenv
 
 PASTA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "migrations")
 ARQUIVO = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
-# Comandos de sessao do isql: nao sao SQL para o servidor
+# Comandos que só fazem sentido no isql (o terminal do Firebird), não são SQL para o servidor
 IGNORADOS = re.compile(r"^(SET\s+(SQL\s+DIALECT|NAMES|AUTODDL)\b|COMMIT(\s+WORK)?$)", re.I)
 
 
@@ -31,7 +36,8 @@ def conectar():
 
 
 def criar_banco():
-    # CREATE DATABASE nunca sobrescreve um arquivo existente.
+    """Cria o arquivo .FDB vazio. CREATE DATABASE nunca sobrescreve um arquivo que já existe."""
+    # Com DB_HOST o Firebird recebe 'host:caminho'; sem ele, abre o arquivo direto
     alvo = f"{os.getenv('DB_HOST')}:{os.getenv('DB_DATABASE')}" if os.getenv("DB_HOST") else os.getenv("DB_DATABASE")
     fdb.create_database(
         sql=f"CREATE DATABASE '{alvo}' USER '{os.getenv('DB_USER')}' PASSWORD '{os.getenv('DB_PASSWORD')}' "
@@ -41,18 +47,26 @@ def criar_banco():
 
 
 def comandos(texto):
-    """Divide um script do isql em comandos, respeitando aspas, comentarios e SET TERM."""
+    """Divide um script do isql em comandos, respeitando aspas, comentarios e SET TERM.
+
+    Não dá para só fazer texto.split(';'): um ';' pode estar dentro de um texto entre aspas, de um comentário
+    ou de uma procedure. Por isso o texto é lido caractere por caractere, com `i` marcando a posição atual.
+    SET TERM troca o terminador (ex.: para '^') enquanto o script cria procedures e triggers.
+    """
     terminador, atual, resultado = ";", [], []
     i = 0
     while i < len(texto):
+        # Comentário /* ... */: pula até o fim dele
         if texto.startswith("/*", i):
             fim = texto.find("*/", i + 2)
             i = len(texto) if fim < 0 else fim + 2
             continue
+        # Comentário de linha -- ...: pula até a quebra de linha
         if texto.startswith("--", i):
             fim = texto.find("\n", i)
             i = len(texto) if fim < 0 else fim
             continue
+        # Texto entre aspas: copia inteiro. Aspa dobrada ('') é uma aspa dentro do texto, não o fim dele
         if texto[i] in "'\"":
             aspa, j = texto[i], i + 1
             while j < len(texto) and not (texto[j] == aspa and not texto.startswith(aspa * 2, j)):
@@ -60,6 +74,7 @@ def comandos(texto):
             atual.append(texto[i:j + 1])
             i = j + 1
             continue
+        # Achou o terminador: fecha o comando atual
         if texto.startswith(terminador, i):
             comando = "".join(atual).strip()
             atual, i = [], i + len(terminador)
@@ -77,6 +92,7 @@ def comandos(texto):
 
 
 def migrations():
+    """[(versão, nome do arquivo), ...] em ordem. Recusa nome fora do padrão e versão repetida."""
     encontradas = {}
     for nome in sorted(os.listdir(PASTA)):
         casamento = ARQUIVO.match(nome)
@@ -92,11 +108,17 @@ def migrations():
 
 
 def tabela_existe(cur, nome):
+    # RDB$RELATIONS é a tabela de sistema do Firebird que lista todas as tabelas do banco
     cur.execute("SELECT 1 FROM RDB$RELATIONS WHERE RDB$RELATION_NAME = ?", (nome,))
     return cur.fetchone() is not None
 
 
 def preparar_controle(con, baseline):
+    """Cria a SCHEMA_MIGRATION se ela ainda não existe.
+
+    Banco antigo (com tabelas, mas sem controle) só passa com --baseline: ele registra as migrations até
+    a versão informada como já aplicadas, sem rodar, porque o schema delas já está no banco.
+    """
     cur = con.cursor()
     if tabela_existe(cur, "SCHEMA_MIGRATION"):
         if baseline is not None:
@@ -121,6 +143,7 @@ def preparar_controle(con, baseline):
 
 
 def aplicadas(con):
+    """Versões que já rodaram neste banco."""
     cur = con.cursor()
     if not tabela_existe(cur, "SCHEMA_MIGRATION"):
         return set()
@@ -140,6 +163,7 @@ def executar_arquivo(con, caminho, registrar=None):
             cur.execute("INSERT INTO SCHEMA_MIGRATION (VERSAO, NOME) VALUES (?, ?)", registrar)
         con.commit()
     except Exception:
+        # Tudo ou nada: um comando que falha desfaz o arquivo inteiro, e ele continua pendente
         con.rollback()
         raise
     return len(lista)
@@ -163,6 +187,7 @@ def main(argv=None):
         try:
             con = conectar()
         except fdb.DatabaseError:
+            # Não conectou: o banco não existe. Só cria se pediram --criar
             if not args.criar:
                 raise
             criar_banco()
