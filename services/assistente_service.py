@@ -7,6 +7,7 @@ from time import sleep
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from funcao import formatar_reais
 from services import consultas_service, disponibilidade_service, profissionais_service, whatsapp_service
 from services.erros import ErroNegocio
 
@@ -349,11 +350,9 @@ def _executar(paciente_id, tipo, dados):
     """O SIM do paciente: agenda ou cancela pelas mesmas regras das rotas do site."""
     if tipo == 'agendamento':
         consultas_service.agendar(paciente_id, 'PACIENTE', dados)
-        minutos = int(consultas_service.RESERVA_SEM_PAGAMENTO.total_seconds() // 60)
-        return (f'Horário reservado por {minutos} minutos. A consulta só é confirmada com o pagamento, '
+        return (f'Horário reservado por {consultas_service.MINUTOS_RESERVA} minutos. A consulta só é confirmada com o pagamento, '
                 'feito na tela da consulta no site.')
     reembolso = consultas_service.cancelar(paciente_id, 'PACIENTE', dados['sessao_id'])['reembolso_centavos']
     if reembolso:
-        valor = f'{reembolso / 100:.2f}'.replace('.', ',')
-        return f'Consulta cancelada. Vamos devolver R$ {valor} integralmente.'
+        return f'Consulta cancelada. Vamos devolver {formatar_reais(reembolso)} integralmente.'
     return 'Consulta cancelada.'

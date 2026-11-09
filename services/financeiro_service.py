@@ -2,6 +2,7 @@ from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from database.db import transacao
+from funcao import formatar_reais
 from services import notificacoes_service, pagamentos_service, planos_service
 from services.auditoria_service import auditar
 from services.erros import ErroNegocio
@@ -175,10 +176,6 @@ def pagar_repasse(admin_id, repasse_id, dados):
     return _pagar_saida(admin_id, 'REPASSE', repasse_id, dados)
 
 
-def _reais(centavos):
-    return f'R$ {centavos / 100:.2f}'.replace('.', ',')
-
-
 def _ler_status(status):
     if status is not None and status not in STATUS_SAIDA:
         raise ErroNegocio('status deve ser PENDENTE ou PAGO')
@@ -213,7 +210,7 @@ def _pagar_saida(admin_id, tabela, registro_id, dados):
             raise ErroNegocio(f'{tabela.capitalize()} ja foi pago', 409)
         auditar(cur, admin_id, f'{tabela}_PAGO', tabela, registro_id)
         email = notificacoes_service.notificar(
-            cur, destinatario, f'{tabela}_PAGO', saida['titulo'], saida['mensagem'].format(valor=_reais(valor)),
+            cur, destinatario, f'{tabela}_PAGO', saida['titulo'], saida['mensagem'].format(valor=formatar_reais(valor)),
             {f'{tabela.lower()}_id': registro_id})
     notificacoes_service.enviar_emails([email])
     return {f'{tabela.lower()}_id': registro_id, 'status': 'PAGO', 'valor_centavos': valor,

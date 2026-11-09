@@ -2,6 +2,7 @@ import logging
 from datetime import date, datetime, timedelta
 
 from database.db import transacao
+from funcao import formatar_reais
 from services import notificacoes_service, pagamentos_service
 from services.auditoria_service import auditar
 from services.erros import ErroNegocio
@@ -40,10 +41,6 @@ def iniciar_gratis(cur, profissional_id):
                 (profissional_id, date.today() + GRATIS))
 
 
-def _reais(centavos):
-    return f'R$ {centavos / 100:.2f}'.replace('.', ',')
-
-
 def _estado(cur, profissional_id):
     cur.execute('SELECT PLANO, VALIDA_ATE, RENOVAR, PLANO_PROXIMO FROM ASSINATURA WHERE PROFISSIONAL_ID = ?',
                 (profissional_id,))
@@ -72,7 +69,7 @@ def _ativar(cur, profissional_id, plano, centavos):
     auditar(cur, profissional_id, 'ASSINATURA_PAGA', 'ASSINATURA', profissional_id)
     return [notificacoes_service.notificar(
         cur, profissional_id, 'ASSINATURA_ATIVA', 'Assinatura confirmada',
-        f'Recebemos {_reais(centavos)} pelo plano {PLANOS[plano][0]}, que vale até {valida_ate:%d/%m/%Y}.',
+        f'Recebemos {formatar_reais(centavos)} pelo plano {PLANOS[plano][0]}, que vale até {valida_ate:%d/%m/%Y}.',
         {'plano': plano})]
 
 
@@ -228,6 +225,6 @@ def _gerar_renovacao(profissional_id, plano, valida_ate):
         emails = [notificacoes_service.notificar(
             cur, profissional_id, 'ASSINATURA_RENOVACAO', 'Renove sua assinatura',
             f'Sua assinatura vence em {valida_ate:%d/%m/%Y}. Para continuar no plano {nome} e visível no PsicoDaily, '
-            f'pague {_reais(centavos)} pelo Pix {cobranca.get("codigo_pagamento")} ou pela tela de assinatura.',
+            f'pague {formatar_reais(centavos)} pelo Pix {cobranca.get("codigo_pagamento")} ou pela tela de assinatura.',
             {'cobranca_id': cobranca_id})]
     notificacoes_service.enviar_emails(emails)

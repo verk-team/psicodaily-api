@@ -8,7 +8,8 @@ from urllib.request import Request, urlopen
 
 import fdb
 
-from database.db import transacao
+from database.db import nomes_das_colunas, transacao
+from funcao import formatar_data_hora
 from services import (assinaturas_service, disponibilidade_service, email_service, lista_espera_service,
                       notificacoes_service, pagamentos_service)
 from services.auditoria_service import auditar
@@ -22,6 +23,7 @@ MENSAGEM_CONFLITO = 'Profissional ou paciente ja possui consulta nesse horario'
 ANTECEDENCIA_CANCELAMENTO = timedelta(minutes=15)
 # A consulta so vale paga: sem pagamento, o horario fica reservado por este tempo e depois volta a ficar livre
 RESERVA_SEM_PAGAMENTO = timedelta(minutes=30)
+MINUTOS_RESERVA = int(RESERVA_SEM_PAGAMENTO.total_seconds() // 60)
 
 
 def serializar_sessao(colunas, linha):
@@ -35,7 +37,7 @@ def serializar_sessao(colunas, linha):
 
 def _sessao_retornada(cur):
     linha = cur.fetchone()
-    return serializar_sessao([desc[0].lower() for desc in cur.description], linha)
+    return serializar_sessao(nomes_das_colunas(cur), linha)
 
 
 def ler_intervalo(inicio, fim):
@@ -99,7 +101,7 @@ def listar(usuario_id, papel):
             {where}
             ORDER BY s.DATA_HORA_INICIO DESC
         ''', parametros)
-        colunas = [col[0].lower() for col in cur.description]
+        colunas = nomes_das_colunas(cur)
         return [serializar_sessao(colunas, linha) for linha in cur.fetchall()]
 
 
@@ -161,12 +163,11 @@ def agendar(paciente_id, papel, data):
         """, (paciente_id, id_profissional, None, None, inicio, fim, profissional[0], None))
         sessao = _sessao_retornada(cur)
         auditar(cur, paciente_id, 'SESSAO_AGENDADA', 'SESSAO', sessao['sessao_id'])
-        quando = inicio.strftime('%d/%m/%Y às %H:%M')
-        minutos = int(RESERVA_SEM_PAGAMENTO.total_seconds() // 60)
+        quando = formatar_data_hora(inicio)
         # O profissional so fica sabendo quando o pagamento confirma (pagamentos_service._sessao_paga)
         emails = [notificacoes_service.notificar(
             cur, paciente_id, 'SESSAO_AGENDADA', 'Horário reservado',
-            f'Reservamos o horário de {quando} por {minutos} minutos. A consulta só é confirmada com o pagamento; '
+            f'Reservamos o horário de {quando} por {MINUTOS_RESERVA} minutos. A consulta só é confirmada com o pagamento; '
             f'sem ele, a reserva é cancelada.', {'sessao_id': sessao['sessao_id']})]
     notificacoes_service.enviar_emails(emails)
     return sessao
@@ -200,12 +201,11 @@ def _cancelar_reserva(sessao_id):
         paciente_id, profissional_id, inicio, fim = cur.fetchone()
         if paciente_id is None:
             return 0  # pago ou cancelado entre a busca e aqui
-        minutos = int(RESERVA_SEM_PAGAMENTO.total_seconds() // 60)
         emails = lista_espera_service.avisar_vaga(cur, profissional_id, inicio, fim, paciente_id)
         emails.append(notificacoes_service.notificar(
             cur, paciente_id, 'SESSAO_CANCELADA', 'Reserva cancelada',
-            f'A reserva da consulta de {inicio.strftime("%d/%m/%Y às %H:%M")} foi cancelada porque o pagamento '
-            f'não foi concluído em {minutos} minutos. Se ainda quiser o horário, agende de novo.', {'sessao_id': sessao_id}))
+            f'A reserva da consulta de {formatar_data_hora(inicio)} foi cancelada porque o pagamento '
+            f'não foi concluído em {MINUTOS_RESERVA} minutos. Se ainda quiser o horário, agende de novo.', {'sessao_id': sessao_id}))
     notificacoes_service.enviar_emails(emails)
     return 1
 
@@ -279,7 +279,7 @@ def atualizar(profissional_id, sessao_id, dados):
         atualizada = _sessao_retornada(cur)
         auditar(cur, profissional_id, 'SESSAO_ALTERADA', 'SESSAO', sessao_id)
         # 30: o paciente fica sabendo de horario novo e de link novo (tambem pelo WhatsApp)
-        quando = (intervalo[0] if intervalo else sessao[1]).strftime('%d/%m/%Y às %H:%M')
+        quando = formatar_data_hora(intervalo[0] if intervalo else sessao[1])
         avisos = ([('Consulta remarcada', f'Sua consulta passou para {quando}.')] if intervalo else []) + \
                  ([('Link da consulta', f'O link da sua consulta de {quando} é {link}')] if link else [])
         emails = [notificacoes_service.notificar(cur, sessao[3], 'SESSAO_ALTERADA', titulo, mensagem,
@@ -345,7 +345,7 @@ def _ao_cancelar(cur, sessao_id, profissional_id, paciente_id, inicio, fim, avis
     emails = lista_espera_service.avisar_vaga(cur, profissional_id, inicio, fim, paciente_id)
     quem_cancelou = paciente_id if avisar == profissional_id else profissional_id
     cur.execute('SELECT NOME FROM USUARIO WHERE ID_USUARIO = ?', (quem_cancelou,))
-    mensagem = f'{cur.fetchone()[0]} cancelou a consulta de {inicio.strftime("%d/%m/%Y às %H:%M")}.'
+    mensagem = f'{cur.fetchone()[0]} cancelou a consulta de {formatar_data_hora(inicio)}.'
     if reembolso and avisar == paciente_id:
         mensagem += ' O valor pago será devolvido integralmente.'
     emails.append(notificacoes_service.notificar(cur, avisar, 'SESSAO_CANCELADA', 'Consulta cancelada', mensagem,
@@ -470,6 +470,6 @@ def avisar_entrada_na_sala(sala, id_usuario, presentes):
             f"{quem_entrou['nome']} entrou na sala da sua consulta",
             f"Olá, {destino['nome']}.\n\n"
             f"{quem_entrou['nome']} já está na sala da consulta de "
-            f"{sala['inicio'].strftime('%d/%m/%Y às %H:%M')} e aguarda você.\n\n"
+            f"{formatar_data_hora(sala['inicio'])} e aguarda você.\n\n"
             f"Entre pelo link: {link}",
         )

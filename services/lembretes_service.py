@@ -4,6 +4,7 @@ import time
 from datetime import datetime, timedelta
 
 from database.db import transacao
+from funcao import formatar_data_hora
 from services import assinaturas_service, consultas_service, notificacoes_service
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ def enviar_lembretes(agora=None):
                     WHERE SESSAO_ID = ? AND {coluna} IS NULL RETURNING SESSAO_ID''', (sessao_id,))
                 if cur.fetchone()[0] is None:
                     continue
-                quando = inicio.strftime('%d/%m/%Y às %H:%M')
+                quando = formatar_data_hora(inicio)
                 sala = consultas_service.url_sala(sessao_id)
                 dados = {'sessao_id': sessao_id}
                 emails += [

@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
 from database.db import transacao
+from funcao import formatar_data_hora
 from services import assinaturas_service, consultas_service, disponibilidade_service, notificacoes_service
 from services.erros import ErroNegocio
 
@@ -85,7 +86,7 @@ def avisar_vaga(cur, profissional_id, inicio, fim, paciente_da_sessao):
     cur.execute('UPDATE LISTA_ESPERA SET AVISADO_EM = CURRENT_TIMESTAMP WHERE LISTA_ESPERA_ID = ?', (lista_espera_id,))
     cur.execute('SELECT NOME FROM USUARIO WHERE ID_USUARIO = ?', (profissional_id,))
     nome_profissional = cur.fetchone()[0]
-    horario = inicio.strftime('%d/%m/%Y às %H:%M')
+    horario = formatar_data_hora(inicio)
     return [notificacoes_service.notificar(
         cur, paciente_id, 'VAGA_LISTA_ESPERA', f'Abriu um horário com {nome_profissional}',
         f'O horário de {horario} com {nome_profissional} ficou livre. Quem agendar primeiro fica com a vaga.',

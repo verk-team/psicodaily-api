@@ -9,6 +9,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from database.db import transacao
+from funcao import formatar_data_hora, formatar_reais
 from services import notificacoes_service, planos_service
 from services.erros import ErroNegocio
 
@@ -336,8 +337,8 @@ def _sessao_paga(cur, sessao_id, profissional_id, inicio, metodo, id_arkhe):
     cur.execute("UPDATE SESSAO SET STATUS = 'CONFIRMADO' WHERE SESSAO_ID = ? AND STATUS = 'AGENDADO'", (sessao_id,))
     cur.execute('SELECT NOME FROM USUARIO WHERE ID_USUARIO = ?', (paciente_id,))
     nome_paciente = cur.fetchone()[0]
-    quando = inicio.strftime("%d/%m/%Y às %H:%M")
-    valor = f'R$ {centavos / 100:.2f}'.replace('.', ',')
+    quando = formatar_data_hora(inicio)
+    valor = formatar_reais(centavos)
     dados = {'sessao_id': sessao_id}
     return [
         # So aqui o profissional fica sabendo: consulta sem pagamento nao conta como marcada

@@ -81,6 +81,11 @@ def transacao():
         con.close()
 
 
+def nomes_das_colunas(cur):
+    """Nomes das colunas da última consulta do cursor, em minúsculas. Viram as chaves do JSON."""
+    return [coluna[0].lower() for coluna in cur.description]
+
+
 def banco_responde():
     """Health check: True se o Firebird responde a uma consulta."""
     try:
