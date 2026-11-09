@@ -1,3 +1,4 @@
+"""Profissionais favoritos do paciente, cada um com o próximo horário livre."""
 from database.db import transacao
 from services import disponibilidade_service
 from services.erros import ErroNegocio
