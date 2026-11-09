@@ -1,3 +1,11 @@
+"""Login, token JWT, código por e-mail (ativação e recuperação) e troca de senha.
+
+Termos:
+- JWT: um texto com os dados do usuário (id e papel) e a validade, assinado com a SECRET_KEY. Quem não tem
+  a chave não consegue alterar o token sem invalidar a assinatura. `iat` é quando foi emitido; `exp`, quando vence.
+- hash de senha (bcrypt): a senha nunca é gravada; grava-se um resumo dela que não dá para desfazer.
+  No login, a senha digitada passa pelo mesmo cálculo e os resultados são comparados.
+"""
 import calendar
 import secrets
 import time
@@ -15,9 +23,10 @@ from services.erros import ErroNegocio
 from services.upload_service import upload_service
 
 
-DURACAO_TOKEN = 8 * 3600
+DURACAO_TOKEN = 8 * 3600  # segundos: o login vale 8 horas
 VALIDADE_CODIGO_MIN = 15
 MAXIMO_TENTATIVAS = 5
+# Trecho de UPDATE que apaga o código: depois de usado, vencido ou com tentativas demais, ele não vale mais
 _LIMPA_CODIGO = "CODIGO = NULL, CODIGO_EXPIRA_EM = NULL, CODIGO_TENTATIVAS = 0"
 
 
@@ -27,12 +36,12 @@ def gerar_token(payload):
 
 
 def decodificar_token(token):
-    # Token sem exp (emitido antes do S4) nao vale mais
+    """Confere a assinatura e a validade do token. Recusa token sem exp ou iat (os antigos não tinham validade)."""
     return jwt.decode(token, config.SECRET_KEY, algorithms=['HS256'], options={'require': ['exp', 'iat']})
 
 
 def _agora_utc():
-    # SENHA_ALTERADA_EM fica em UTC, em segundos, para comparar com o iat do token
+    # SENHA_ALTERADA_EM fica em UTC e sem fração de segundo, para comparar com o iat do token
     return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
 
 
@@ -48,7 +57,12 @@ def usuario_do_token(token):
     with transacao() as cur:
         cur.execute("SELECT ATIVO, SENHA_ALTERADA_EM FROM USUARIO WHERE ID_USUARIO = ?", (dados.get('id_usuario'),))
         usuario = cur.fetchone()
-    if not usuario or not usuario[0] or (usuario[1] and dados['iat'] < calendar.timegm(usuario[1].timetuple())):
+    if not usuario:
+        raise ErroNegocio("Token invalido", 401)
+    ativo, senha_alterada_em = usuario
+    # Trocar a senha derruba os logins anteriores: um token emitido antes da troca não vale mais
+    emitido_antes_da_troca = senha_alterada_em and dados['iat'] < calendar.timegm(senha_alterada_em.timetuple())
+    if not ativo or emitido_antes_da_troca:
         raise ErroNegocio("Token invalido", 401)
     return dados
 
@@ -62,6 +76,7 @@ def criar_hash_senha(senha):
 
 
 def gerar_codigo():
+    """Código de 6 dígitos ('004213'). `secrets` sorteia de forma imprevisível, ao contrário de `random`."""
     return f"{secrets.randbelow(1000000):06d}"
 
 
@@ -71,19 +86,24 @@ def _conferir_codigo(cur, email, codigo):
     cur.execute("""SELECT ID_USUARIO, CODIGO, CASE WHEN CODIGO_EXPIRA_EM < CURRENT_TIMESTAMP THEN 1 ELSE 0 END
         FROM USUARIO WHERE LOWER(EMAIL) = ?""", (email,))
     usuario = cur.fetchone()
-    if not usuario or usuario[1] is None:
+    if not usuario:
         return None, "Codigo invalido"
-    if usuario[2]:
-        cur.execute(f"UPDATE USUARIO SET {_LIMPA_CODIGO} WHERE ID_USUARIO = ?", (usuario[0],))
+    id_usuario, codigo_salvo, expirou = usuario
+    if codigo_salvo is None:
+        return None, "Codigo invalido"
+    if expirou:
+        cur.execute(f"UPDATE USUARIO SET {_LIMPA_CODIGO} WHERE ID_USUARIO = ?", (id_usuario,))
         return None, "Codigo expirado, solicite um novo"
-    if not secrets.compare_digest(str(usuario[1]).strip().encode(), codigo.encode()):
+    # compare_digest leva o mesmo tempo acertando ou errando, então não dá para descobrir o código medindo o tempo
+    if not secrets.compare_digest(str(codigo_salvo).strip().encode(), codigo.encode()):
         cur.execute("""UPDATE USUARIO SET CODIGO_TENTATIVAS = COALESCE(CODIGO_TENTATIVAS, 0) + 1
-            WHERE ID_USUARIO = ? RETURNING CODIGO_TENTATIVAS""", (usuario[0],))
+            WHERE ID_USUARIO = ? RETURNING CODIGO_TENTATIVAS""", (id_usuario,))
+        # Sem limite, alguém poderia testar os 1 milhão de códigos até acertar
         if cur.fetchone()[0] >= MAXIMO_TENTATIVAS:
-            cur.execute(f"UPDATE USUARIO SET {_LIMPA_CODIGO} WHERE ID_USUARIO = ?", (usuario[0],))
+            cur.execute(f"UPDATE USUARIO SET {_LIMPA_CODIGO} WHERE ID_USUARIO = ?", (id_usuario,))
             return None, "Codigo invalidado apos muitas tentativas, solicite um novo"
         return None, "Codigo invalido"
-    return usuario[0], None
+    return id_usuario, None
 
 
 def autenticar(email, senha):
@@ -99,24 +119,26 @@ def autenticar(email, senha):
     if not usuario:
         auditar_avulso(None, 'LOGIN_FALHA')
         raise ErroNegocio("Usuario nao encontrado", 404)
-    if not senha_correta(usuario[1], senha):
-        auditar_avulso(usuario[0], 'LOGIN_FALHA', 'USUARIO', usuario[0])
+    id_usuario, senha_hash, ativo, papel, nome, email_cadastrado = usuario
+    if not senha_correta(senha_hash, senha):
+        auditar_avulso(id_usuario, 'LOGIN_FALHA', 'USUARIO', id_usuario)
         raise ErroNegocio("Senha incorreta", 401)
-    if not usuario[2]:
+    if not ativo:
         raise ErroNegocio("Usuario inativo", 403)
-    auditar_avulso(usuario[0], 'LOGIN', 'USUARIO', usuario[0])
+    auditar_avulso(id_usuario, 'LOGIN', 'USUARIO', id_usuario)
 
-    token = gerar_token({'id_usuario': usuario[0], 'usuario_role': usuario[3]})
+    token = gerar_token({'id_usuario': id_usuario, 'usuario_role': papel})
     return {
-        "id_usuario": usuario[0],
-        "tipo_usuario": usuario[3],
-        "nome": usuario[4],
-        "email": usuario[5],
-        "foto_url": upload_service.url_foto_usuario(usuario[0]),
+        "id_usuario": id_usuario,
+        "tipo_usuario": papel,
+        "nome": nome,
+        "email": email_cadastrado,
+        "foto_url": upload_service.url_foto_usuario(id_usuario),
     }, token
 
 
 def verificar_codigo(email, codigo):
+    """Ativa a conta com o código recebido por e-mail."""
     if not email or not codigo:
         raise ErroNegocio("Email e codigo sao obrigatorios")
     email = str(email).strip().lower()
@@ -125,11 +147,13 @@ def verificar_codigo(email, codigo):
         id_usuario, erro = _conferir_codigo(cur, email, str(codigo).strip())
         if id_usuario:
             cur.execute(f"UPDATE USUARIO SET ATIVO = TRUE, {_LIMPA_CODIGO} WHERE ID_USUARIO = ?", (id_usuario,))
+    # O erro só é levantado depois do commit, para a tentativa errada continuar contada
     if erro:
         raise ErroNegocio(erro, 401)
 
 
 def esqueci_senha(email):
+    """Gera um código de recuperação que vale 15 minutos e manda por e-mail."""
     if not email:
         raise ErroNegocio("Email e obrigatorio")
 
@@ -138,16 +162,18 @@ def esqueci_senha(email):
         usuario = cur.fetchone()
         if not usuario:
             raise ErroNegocio("Usuario nao encontrado", 404)
+        id_usuario, email_cadastrado, nome = usuario
         codigo = gerar_codigo()
-        # O codigo de ativacao do cadastro nao expira (nao ha rota de reenvio); este expira e tambem ativa a conta
+        # O código de ativação do cadastro não expira (não há rota de reenvio); este expira e também ativa a conta
         cur.execute(f"""UPDATE USUARIO SET CODIGO = ?, CODIGO_TENTATIVAS = 0,
             CODIGO_EXPIRA_EM = DATEADD({VALIDADE_CODIGO_MIN} MINUTE TO CURRENT_TIMESTAMP) WHERE ID_USUARIO = ?""",
-                    (codigo, usuario[0]))
+                    (codigo, id_usuario))
 
-    email_service.enviar_email_codigo_async(usuario[1], usuario[2], codigo, "recuperacao")
+    email_service.enviar_email_codigo_async(email_cadastrado, nome, codigo, "recuperacao")
 
 
 def alterar_senha(email, codigo, nova_senha):
+    """Troca a senha de quem esqueceu, com o código de recuperação."""
     email = (email or '').strip().lower()
     if not codigo or not nova_senha or not email:
         raise ErroNegocio("Email, codigo e senha sao obrigatorios")
@@ -176,7 +202,8 @@ def alterar_senha_logado(id_usuario, usuario_role, senha_atual, nova_senha):
         usuario = cur.fetchone()
         if not usuario:
             raise ErroNegocio("Usuario indisponivel", 401)
-        if not senha_correta(usuario[0], senha_atual):
+        senha_hash = usuario[0]
+        if not senha_correta(senha_hash, senha_atual):
             raise ErroNegocio("Senha atual incorreta", 401)
         cur.execute("UPDATE USUARIO SET SENHA = ?, SENHA_ALTERADA_EM = ? WHERE ID_USUARIO = ?",
                     (criar_hash_senha(nova_senha), _agora_utc(), id_usuario))
