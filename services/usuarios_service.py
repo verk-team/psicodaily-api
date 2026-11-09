@@ -1,3 +1,4 @@
+"""Conta do usuário: cadastro de paciente, a parte comum do cadastro de qualquer papel, perfil e foto."""
 import logging
 
 from database.db import transacao
@@ -9,11 +10,13 @@ from services.auth_service import criar_hash_senha, gerar_codigo
 from services.erros import ErroNegocio
 from services.upload_service import upload_service
 
+# Campo da API -> coluna do banco. Só estes campos podem ser editados pelo próprio usuário
 CAMPOS_PERFIL = {"nome": "NOME", "email": "EMAIL", "telefone": "TELEFONE", "cpf": "CPF"}
 logger = logging.getLogger(__name__)
 
 
 def salvar_imagem_usuario(imagem, id_usuario):
+    """Envia a foto de perfil para o R2, se veio uma."""
     if not imagem or not imagem.filename:
         return
     upload_service.upload_file(imagem.stream, id_usuario)
@@ -28,7 +31,11 @@ def salvar_foto_do_cadastro(imagem, id_usuario):
 
 
 def criar_usuario_base(cur, formulario, imagem, usuario_role, exigir_confirmacao_senha=False):
-    """Valida e insere o USUARIO dentro da transacao do chamador; nao commita."""
+    """Valida e insere o USUARIO dentro da transacao do chamador; nao commita.
+
+    Usado pelo cadastro de paciente e pelo de profissional (que grava o resto em PROFISSIONAL na mesma transação).
+    A conta nasce inativa, com um código de ativação que vai por e-mail.
+    """
     email = obter_campo(formulario, 'email').lower()
     nome = obter_campo(formulario, 'nome')
     telefone = obter_campo(formulario, 'telefone')
@@ -75,49 +82,58 @@ def criar_usuario_base(cur, formulario, imagem, usuario_role, exigir_confirmacao
 
 
 def enviar_ativacao(usuario):
+    """Manda o código de ativação por e-mail, em segundo plano."""
     email_service.enviar_email_ativacao(usuario["email"], usuario["codigo"], usuario["nome"])
 
 
 def cadastrar_paciente(formulario, imagem):
     with transacao() as cur:
         usuario = criar_usuario_base(cur, formulario, imagem, 'PACIENTE', exigir_confirmacao_senha=True)
+    # Foto e e-mail só depois do commit: se o cadastro falhar, não sobra foto nem e-mail de uma conta que não existe
     salvar_foto_do_cadastro(imagem, usuario["id_usuario"])
     enviar_ativacao(usuario)
     return usuario
 
 
 def perfil(id_usuario):
+    """Os dados da conta de quem está logado."""
     with transacao() as cur:
-        # A meta mensal sai aqui, e nao no perfil publico do profissional: so o dono ve (null para paciente e admin)
+        # A meta mensal sai aqui, e não no perfil público do profissional: só o dono vê (null para paciente e admin)
         cur.execute('''SELECT u.ID_USUARIO, u.NOME, u.EMAIL, u.USUARIO_ROLE, u.TELEFONE, u.CPF, p.META_MENSAL_CENTAVOS
             FROM USUARIO u LEFT JOIN PROFISSIONAL p ON p.USUARIO_ID = u.ID_USUARIO
             WHERE u.ID_USUARIO = ? AND u.ATIVO = TRUE''', (id_usuario,))
         usuario = cur.fetchone()
     if usuario is None:
         raise ErroNegocio("Usuario indisponivel", 401)
+    id_usuario, nome, email, papel, telefone, cpf, meta_mensal = usuario
     return {
-        "id_usuario": usuario[0], "nome": usuario[1],
-        "email": usuario[2], "tipo_usuario": usuario[3],
-        "telefone": usuario[4], "cpf": usuario[5],
-        "foto_url": upload_service.url_foto_usuario(usuario[0]),
-        "meta_mensal_centavos": usuario[6],
+        "id_usuario": id_usuario, "nome": nome,
+        "email": email, "tipo_usuario": papel,
+        "telefone": telefone, "cpf": cpf,
+        "foto_url": upload_service.url_foto_usuario(id_usuario),
+        "meta_mensal_centavos": meta_mensal,
     }
 
 
 def atualizar_perfil(id_usuario, formulario, imagem, substituir_tudo):
-    """substituir_tudo=True e o PUT: exige todos os campos."""
+    """Edita nome, e-mail, telefone, CPF e a foto. substituir_tudo=True e o PUT: exige todos os campos."""
     with transacao() as cur:
         cur.execute("SELECT ATIVO, EMAIL, CPF FROM USUARIO WHERE ID_USUARIO = ?", (id_usuario,))
         usuario = cur.fetchone()
-        if not usuario or not usuario[0]:
+        if not usuario:
             raise ErroNegocio("Usuario indisponivel", 401)
-        email_atual = (usuario[1] or "").strip().lower()
-        cpf_atual = somente_digitos(usuario[2] or "")
+        ativo, email_salvo, cpf_salvo = usuario
+        if not ativo:
+            raise ErroNegocio("Usuario indisponivel", 401)
+        email_atual = (email_salvo or "").strip().lower()
+        cpf_atual = somente_digitos(cpf_salvo or "")
 
         if not hasattr(formulario, "keys"):
             raise ErroNegocio("Formato de atualizacao invalido")
         if not set(formulario).issubset(CAMPOS_PERFIL):
             raise ErroNegocio("Campo de perfil invalido")
+
+        # Valida cada campo enviado com o validador dele (e normaliza e-mail e CPF antes)
         atualizacoes = {}
         for campo in formulario:
             valor = obter_campo(formulario, campo)
@@ -141,6 +157,7 @@ def atualizar_perfil(id_usuario, formulario, imagem, substituir_tudo):
         if not validar_imagem_usuario(imagem):
             raise ErroNegocio("Imagem deve ser um arquivo JPG ou JPEG")
 
+        # E-mail e CPF são únicos: não podem ficar iguais aos de outra conta
         if "email" in atualizacoes and atualizacoes["email"] != email_atual:
             cur.execute("SELECT FIRST 1 1 FROM USUARIO WHERE LOWER(EMAIL) = ? AND ID_USUARIO <> ?",
                         (atualizacoes["email"], id_usuario))
@@ -153,6 +170,7 @@ def atualizar_perfil(id_usuario, formulario, imagem, substituir_tudo):
                 raise ErroNegocio("CPF ja cadastrado", 409)
 
         if atualizacoes:
+            # Os nomes das colunas vêm de CAMPOS_PERFIL (fixo no código), nunca da requisição: sem risco de SQL injection
             definicoes = ", ".join(f"{CAMPOS_PERFIL[campo]} = ?" for campo in atualizacoes)
             cur.execute(f"UPDATE USUARIO SET {definicoes} WHERE ID_USUARIO = ?", (*atualizacoes.values(), id_usuario))
             if atualizacoes.get("email", email_atual) != email_atual:
@@ -161,10 +179,11 @@ def atualizar_perfil(id_usuario, formulario, imagem, substituir_tudo):
 
 
 def listar():
+    """Todos os usuários, para o admin."""
     with transacao() as cur:
         cur.execute("SELECT ID_USUARIO, NOME, EMAIL, USUARIO_ROLE FROM USUARIO ORDER BY NOME")
         return [
-            {"id_usuario": linha[0], "nome": linha[1], "email": linha[2], "tipo": linha[3],
-             "foto_url": upload_service.url_foto_usuario(linha[0])}
-            for linha in cur.fetchall()
+            {"id_usuario": id_usuario, "nome": nome, "email": email, "tipo": papel,
+             "foto_url": upload_service.url_foto_usuario(id_usuario)}
+            for id_usuario, nome, email, papel in cur.fetchall()
         ]

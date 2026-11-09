@@ -1,3 +1,9 @@
+"""WhatsApp pelo WAHA: enviar avisos e identificar quem mandou mensagem.
+
+WAHA (github.com/devlikeapro/waha) é um WhatsApp não oficial controlado por HTTP. Roda como um serviço
+nosso no Northflank, logado no número da plataforma. Sem WAHA_URL (dev, CI), nada é enviado.
+chatId é como o WhatsApp identifica uma conversa: '5511999999999@c.us' (55 = Brasil, 11 = DDD).
+"""
 import hashlib
 import hmac
 import json
@@ -11,12 +17,11 @@ from database.db import transacao
 
 logger = logging.getLogger(__name__)
 
-# WAHA (github.com/devlikeapro/waha): WhatsApp nao oficial por HTTP, servico proprio no Northflank.
-# Sem WAHA_URL (dev, CI) nada e enviado.
-SESSAO = 'default'
+SESSAO = 'default'  # nome da sessão (o número logado) dentro do WAHA
 
 
 def _waha(metodo, caminho, corpo=None):
+    """Chama a API HTTP do WAHA e devolve o JSON da resposta."""
     req = Request(f"{os.getenv('WAHA_URL', '').rstrip('/')}{caminho}", method=metodo,
                   data=json.dumps(corpo).encode() if corpo is not None else None,
                   headers={'X-Api-Key': os.getenv('WAHA_API_KEY', ''), 'Content-Type': 'application/json',
@@ -28,6 +33,7 @@ def _waha(metodo, caminho, corpo=None):
 def chat_id(telefone):
     """Telefone do cadastro ('(11) 99999-9999') -> chatId do WhatsApp ('5511999999999@c.us'); None se nao der."""
     digitos = re.sub(r'\D', '', telefone or '')
+    # Sem o código do país (DDD + número): põe o 55 do Brasil na frente
     if len(digitos) in (10, 11):
         digitos = '55' + digitos
     return f'{digitos}@c.us' if len(digitos) in (12, 13) else None
@@ -41,20 +47,26 @@ def _enviar(telefone, texto):
     try:
         _waha('POST', '/api/sendText', {'session': SESSAO, 'chatId': destino, 'text': texto})
     except Exception:
-        # Melhor esforco, como o e-mail: o aviso ja esta gravado em NOTIFICACAO
+        # Melhor esforço, como o e-mail: o aviso já está gravado em NOTIFICACAO
         logger.exception('WhatsApp nao enviado para %s', destino)
 
 
 def enviar_async(telefone, texto):
+    """Envia em segundo plano, sem a requisição esperar o WAHA."""
     threading.Thread(target=_enviar, args=(telefone, texto), daemon=True).start()
 
 
 def assinatura_valida(corpo, assinatura):
-    """HMAC sha512 do corpo bruto com WAHA_HMAC_KEY (header X-Webhook-Hmac do WAHA)."""
+    """HMAC sha512 do corpo bruto com WAHA_HMAC_KEY (header X-Webhook-Hmac do WAHA).
+
+    HMAC é uma "assinatura" calculada a partir do corpo e de uma chave secreta. Recalculamos aqui e comparamos:
+    se bate, a mensagem veio de quem tem a chave (o WAHA) e não foi alterada no caminho.
+    """
     chave = os.getenv('WAHA_HMAC_KEY')
     if not chave or not assinatura:
         return False
     esperado = hmac.new(chave.encode(), corpo, hashlib.sha512).hexdigest()
+    # compare_digest leva o mesmo tempo acertando ou errando, então não dá para adivinhar a assinatura pelo tempo
     return hmac.compare_digest(esperado, assinatura)
 
 
@@ -63,8 +75,10 @@ def telefone_do_remetente(remetente):
     if remetente.endswith('@c.us'):
         return remetente.split('@')[0]
     if remetente.endswith('@lid'):
+        lid = remetente.split("@")[0]
         try:
-            return (_waha('GET', f'/api/{SESSAO}/lids/{remetente.split("@")[0]}').get('pn') or '').split('@')[0] or None
+            traduzido = _waha('GET', f'/api/{SESSAO}/lids/{lid}').get('pn') or ''
+            return traduzido.split('@')[0] or None
         except Exception:
             logger.exception('Nao traduziu o @lid %s', remetente)
     return None

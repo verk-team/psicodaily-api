@@ -1,16 +1,21 @@
+"""Encaminhamentos: o profissional registra que encaminhou um paciente dele, com motivo e CID opcional.
+
+CID-10 é a Classificação Internacional de Doenças, o código que identifica um diagnóstico (ex.: F32.1).
+"""
 import re
 
-from database.db import transacao
+from database.db import nomes_das_colunas, transacao
 from services.auditoria_service import auditar
 from services.erros import ErroNegocio
 
 CAMPOS = {'id_usuario', 'motivo', 'id_cid'}
 MAXIMO_MOTIVO = 2000
-# CID-10: letra, dois digitos e subcategoria opcional (F32, F32.1, F321)
+# CID-10: letra, dois dígitos e subcategoria opcional (F32, F32.1, F321)
 CID = re.compile(r'^[A-Z]\d{2}(\.?\d{1,2})?$')
 
 
 def _validar(dados):
+    """Confere o corpo e devolve (paciente_id, motivo, cid ou None)."""
     if not isinstance(dados, dict):
         raise ErroNegocio('Formato inválido')
     extras = set(dados) - CAMPOS
@@ -19,6 +24,7 @@ def _validar(dados):
     paciente_id, motivo, cid = dados.get('id_usuario'), dados.get('motivo'), dados.get('id_cid')
     if paciente_id is None or motivo is None:
         raise ErroNegocio('id_usuario e motivo são obrigatórios')
+    # True e False também são int em Python: sem a segunda checagem, true passaria como o id 1
     if not isinstance(paciente_id, int) or isinstance(paciente_id, bool):
         raise ErroNegocio('id_usuario deve ser um número')
     if not isinstance(motivo, str) or not 1 <= len(motivo.strip()) <= MAXIMO_MOTIVO:
@@ -31,6 +37,7 @@ def _validar(dados):
 
 
 def criar(profissional_id, dados):
+    """Cria o encaminhamento, só para um paciente que tem consulta com este profissional."""
     paciente_id, motivo, cid = _validar(dados)
 
     with transacao() as cur:
@@ -45,14 +52,14 @@ def criar(profissional_id, dados):
         VALUES(?, ?, ?, ?, ?) RETURNING *
         """, (paciente_id, profissional_id, cid, motivo, 'ATIVO'))
         linha = cur.fetchone()
-        encaminhamento = dict(zip([desc[0].lower() for desc in cur.description], linha))
+        encaminhamento = dict(zip(nomes_das_colunas(cur), linha))
         auditar(cur, profissional_id, 'ENCAMINHAMENTO_CRIADO', 'ENCAMINHAMENTO', encaminhamento['encaminhamento_id'])
         return encaminhamento
 
 
 def listar(profissional_id):
-    """Só os encaminhamentos feitos por este profissional (S5)."""
+    """Só os encaminhamentos feitos por este profissional: os dos outros têm CID e motivo de pacientes alheios."""
     with transacao() as cur:
         cur.execute('SELECT * FROM ENCAMINHAMENTO WHERE PSICOLOGO_ID = ? ORDER BY CRIADO_EM DESC', (profissional_id,))
-        colunas = [desc[0].lower() for desc in cur.description]
+        colunas = nomes_das_colunas(cur)
         return [dict(zip(colunas, linha)) for linha in cur.fetchall()]

@@ -1,3 +1,9 @@
+"""Pagamento das consultas pela Arkhé (o banco parceiro): Pix, boleto e cartão, e o reembolso no cancelamento.
+
+Pix e boleto são cobranças: a Arkhé cria, o paciente paga depois, e a consulta só vira CONFIRMADO quando
+alguém confere que foi paga. Cartão é uma venda: aprovada ou recusada na hora.
+Dinheiro sempre em centavos inteiros no banco; a Arkhé recebe e devolve em reais.
+"""
 import json
 import math
 import os
@@ -9,6 +15,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from database.db import transacao
+from funcao import formatar_data_hora, formatar_reais
 from services import notificacoes_service, planos_service
 from services.erros import ErroNegocio
 
@@ -19,7 +26,11 @@ ARKHE_BASE_URL = os.getenv(
 
 
 def _arkhe_request(method, path, body=None, bruto=False, cabecalhos=None):
-    """(status, corpo JSON); com bruto=True o corpo de sucesso volta em bytes (PDF do boleto)."""
+    """Chama a API da Arkhé: (status, corpo JSON); com bruto=True o corpo de sucesso volta em bytes (PDF do boleto).
+
+    Erro HTTP da Arkhé (4xx/5xx) volta como (status, detalhe) para quem chamou decidir. Sem conexão ou com
+    resposta ilegível, levanta ErroNegocio 503.
+    """
     client_id = os.getenv('ARKHE_CLIENT_ID') or os.getenv('CLIENT_ID')
     client_secret = os.getenv('ARKHE_CLIENT_SECRET') or os.getenv('CLIENT_SECRET')
     if not client_id or not client_secret:
@@ -30,6 +41,7 @@ def _arkhe_request(method, path, body=None, bruto=False, cabecalhos=None):
         'X-Client-Secret': client_secret,
         'Accept': 'application/json',
     }
+    # As credenciais vão em cabeçalhos em toda chamada (a Arkhé não usa token de login)
     if method == 'POST':
         headers['Content-Type'] = 'application/json'
     headers.update(cabecalhos or {})
@@ -67,6 +79,7 @@ def _arkhe_request(method, path, body=None, bruto=False, cabecalhos=None):
 METODOS = ('PIX', 'BOLETO', 'CARTAO')
 # Pix e boleto sao cobrancas que o paciente paga depois; o cartao e uma venda, aprovada ou recusada na hora
 CAMINHOS = {'PIX': '/api/v1/cobrancas/pix', 'BOLETO': '/api/v1/cobrancas/boletos'}
+# Formato exigido em cada campo do cartão (fullmatch: o texto inteiro precisa casar)
 FORMATOS_CARTAO = {
     'numero_cartao': re.compile(r'\d{16}'),
     'validade': re.compile(r'(0[1-9]|1[0-2])/\d{4}'),
@@ -77,6 +90,7 @@ MAXIMO_PARCELAS = 15  # o mesmo limite da Arkhé
 
 
 def _ler_pedido(dados):
+    """Valida o corpo de POST /api/pagamentos/cobranca e devolve (id_sessao, metodo, cartao)."""
     if not isinstance(dados, dict) or not set(dados) <= {'id_sessao', 'metodo', 'cartao'}:
         raise ErroNegocio('Envie id_sessao, metodo (PIX, BOLETO ou CARTAO) e, se for CARTAO, cartao')
     if not dados.get('id_sessao'):
@@ -116,6 +130,7 @@ def _recusa(status, resposta, mensagem):
 
 
 def _conferir(resposta, campo_id, centavos):
+    """Confere que a Arkhé cobrou exatamente o valor pedido e devolveu o id da cobrança; senão, 502."""
     try:
         valor = Decimal(str(resposta.get('valor')))
     except InvalidOperation:
@@ -132,6 +147,7 @@ def _apresentar(metodo, resposta):
 
 
 def criar_cobranca(paciente_id, papel, dados):
+    """O paciente paga a própria consulta. Reaproveita uma cobrança pendente do mesmo método, se houver."""
     if papel != 'PACIENTE':
         raise ErroNegocio('Somente pacientes podem pagar consultas', 403)
     sessao_id, metodo, cartao = _ler_pedido(dados)
@@ -156,12 +172,13 @@ def criar_cobranca(paciente_id, papel, dados):
     if any(status == 'PAGO' for _, status in pagamentos):
         raise ErroNegocio('Esta sessao ja foi paga', 409)
 
-    # Pendentes (sempre Pix ou boleto) podem ter sido pagos sem ninguem consultar: atualiza antes de cobrar de novo
+    # Pendentes (sempre Pix ou boleto) podem ter sido pagas sem ninguém consultar: atualiza antes de cobrar de novo
     pendentes = [consultar_cobranca(paciente_id, id_cobranca) for id_cobranca, _ in pagamentos]
     if any(cobranca['status'] == 1 for cobranca in pendentes):
         raise ErroNegocio('Esta sessao ja foi paga', 409)
     # Reaproveita a pendente do mesmo metodo: duas iguais abertas deixariam pagar duas vezes.
-    # ponytail: outro metodo abre outra cobranca e a Arkhé nao cancela a antiga; pagar as duas vira reembolso (24)
+    # ponytail: outro método abre outra cobrança e a Arkhé não cancela a antiga; se o paciente pagar as duas,
+    # a segunda vira reembolso (ver _sessao_paga)
     mesma = next((cobranca for cobranca in pendentes if cobranca['metodo'] == metodo), None)
     if mesma:
         return mesma
@@ -183,7 +200,7 @@ def cobrar(metodo, centavos, cartao=None, cpf=None, vencimento=None):
     """Cobra na Arkhé (consulta ou assinatura): (id na Arkhé, resposta para o front, taxa da Arkhé em centavos).
 
     Pix e boleto voltam pendentes; o cartao volta aprovado ou levanta ErroNegocio. So o credito tem taxa."""
-    # Arkhé recebe reais; VALOR_CENTAVOS permanece inteiro no banco.
+    # A Arkhé recebe reais; VALOR_CENTAVOS continua inteiro no banco
     valor = float(Decimal(str(centavos)) / 100)
     if metodo == 'CARTAO':
         status, resposta = _arkhe_request('POST', '/api/v1/vendas/cartao', {**cartao, 'valor': valor})
@@ -192,8 +209,9 @@ def cobrar(metodo, centavos, cartao=None, cpf=None, vencimento=None):
         if resposta.get('aprovado') is not True:
             raise ErroNegocio('Arkhé retornou uma venda invalida', 502)
         _conferir(resposta, 'id_compra', centavos)
-        # A Arkhé fica com 5% no credito (taxa = valor - valor_recebido); na consulta, entra no financeiro do
-        # profissional (32); na assinatura, a plataforma absorve
+        # A Arkhé fica com 5% no crédito (taxa = valor - valor_recebido). Na consulta, essa taxa sai do que o
+        # profissional recebe (ver financeiro_service.liquido); na assinatura, a plataforma absorve.
+        # A taxa vem em reais e vira centavos inteiros, arredondada
         taxa = _numero(resposta.get('taxa'))
         taxa = int((Decimal(str(taxa)) * 100).quantize(Decimal('1'))) if taxa and taxa > 0 else None
         return resposta['id_compra'], _apresentar(metodo, resposta), taxa
@@ -209,9 +227,10 @@ def cobrar(metodo, centavos, cartao=None, cpf=None, vencimento=None):
 
 
 def _pagar_cartao(sessao_id, profissional_id, inicio, centavos, cartao):
+    """Venda no cartão: se aprovada, grava o pagamento já PAGO e confirma a consulta."""
     id_compra, venda, taxa = cobrar('CARTAO', centavos, cartao)
-    # ponytail: se o INSERT falhar apos a aprovacao, a venda fica so na Arkhé (o 500 vai para o log); repetir
-    # nao cobra de novo, porque ela recusa venda igual por 5 minutos
+    # ponytail: se o INSERT falhar após a aprovação, a venda fica só na Arkhé (o 500 vai para o log); repetir
+    # não cobra de novo, porque ela recusa venda igual por 5 minutos
     with transacao() as cur:
         cur.execute('''INSERT INTO PAGAMENTO (SESSAO_ID, ID_COBRANCA_ARKHE, METODO, VALOR_CENTAVOS, STATUS, PAGO_EM,
                 TAXA_ARKHE_CENTAVOS, TAXA_PLATAFORMA_PERCENTUAL)
@@ -223,6 +242,7 @@ def _pagar_cartao(sessao_id, profissional_id, inicio, centavos, cartao):
 
 
 def _pagamento_do_participante(cur, usuario_id, id_cobranca, metodos):
+    """O pagamento da cobrança, só se o usuário é o paciente ou o profissional da consulta; senão 404."""
     cur.execute(f'''SELECT p.METODO, p.STATUS, s.SESSAO_ID, s.PROFISSIONAL_ID, s.DATA_HORA_INICIO
         FROM PAGAMENTO p JOIN SESSAO s ON s.SESSAO_ID = p.SESSAO_ID
         WHERE p.ID_COBRANCA_ARKHE = ? AND p.METODO IN ({', '.join('?' * len(metodos))})
@@ -234,7 +254,8 @@ def _pagamento_do_participante(cur, usuario_id, id_cobranca, metodos):
 
 
 def consultar_cobranca(usuario_id, id_cobranca):
-    # Pix e boleto saem da mesma tabela da Arkhé, entao o id nao se repete entre os dois
+    """Situação da cobrança na Arkhé. Se ela foi paga e aqui ainda está pendente, confirma a consulta."""
+    # Pix e boleto saem da mesma tabela da Arkhé, então o id não se repete entre os dois
     with transacao() as cur:
         metodo, status_local, *sessao = _pagamento_do_participante(cur, usuario_id, id_cobranca, tuple(CAMINHOS))
 
@@ -255,6 +276,7 @@ def consultar_arkhe(metodo, id_cobranca):
 
 
 def boleto_pdf(usuario_id, id_cobranca):
+    """PDF do boleto, só para quem participa da consulta."""
     with transacao() as cur:
         _pagamento_do_participante(cur, usuario_id, id_cobranca, ('BOLETO',))
     return pdf_boleto(id_cobranca)
@@ -268,13 +290,16 @@ def pdf_boleto(id_cobranca):
 
 
 def _confirmar(metodo, id_cobranca, sessao_id, profissional_id, inicio):
-    # shortcut: o status so muda quando alguem consulta a cobranca; webhook ou job (F7) se a Arkhé tiver
+    """Marca o pagamento como PAGO e confirma a consulta. Se outra requisição já confirmou, não faz nada."""
+    # ponytail: a Arkhé não avisa quando o Pix ou o boleto é pago. O status só muda quando alguém consulta a
+    # cobrança ou quando a thread de tarefas confere as reservas; webhook se a Arkhé passar a ter um
     with transacao() as cur:
         cur.execute('''UPDATE PAGAMENTO SET STATUS = 'PAGO', PAGO_EM = CURRENT_TIMESTAMP
             WHERE METODO = ? AND ID_COBRANCA_ARKHE = ? AND STATUS = 'PENDENTE' RETURNING PAGAMENTO_ID''',
                     (metodo, id_cobranca))
+        # No Firebird, UPDATE ... RETURNING que não acha a linha devolve uma linha de NULLs
         if cur.fetchone()[0] is None:
-            return  # outra requisicao confirmou antes
+            return  # outra requisição confirmou antes
         emails = _sessao_paga(cur, sessao_id, profissional_id, inicio, metodo, id_cobranca)
     notificacoes_service.enviar_emails(emails)
 
@@ -325,22 +350,22 @@ def pix_saida(cpf, centavos, chave):
 
 
 def _sessao_paga(cur, sessao_id, profissional_id, inicio, metodo, id_arkhe):
-    """Confirma a sessao e devolve os avisos: ao profissional e o comprovante ao paciente (13)."""
+    """Confirma a sessao e devolve os avisos: ao profissional e o comprovante ao paciente."""
     # O lock espera um cancelamento em andamento (paciente ou reserva expirando) terminar antes de decidir
     cur.execute('SELECT STATUS, PACIENTE_ID, VALOR_CENTAVOS FROM SESSAO WHERE SESSAO_ID = ? WITH LOCK', (sessao_id,))
     status, paciente_id, centavos = cur.fetchone()
     if status == 'CANCELADO':
-        # Pago depois do cancelamento (ou da reserva expirar): a Arkhé nao cancela cobranca, entao o valor volta
+        # Pago depois do cancelamento (ou da reserva expirar): a Arkhé não cancela cobrança, então o valor volta
         registrar_reembolso(cur, sessao_id)
         return []
     cur.execute("UPDATE SESSAO SET STATUS = 'CONFIRMADO' WHERE SESSAO_ID = ? AND STATUS = 'AGENDADO'", (sessao_id,))
     cur.execute('SELECT NOME FROM USUARIO WHERE ID_USUARIO = ?', (paciente_id,))
     nome_paciente = cur.fetchone()[0]
-    quando = inicio.strftime("%d/%m/%Y às %H:%M")
-    valor = f'R$ {centavos / 100:.2f}'.replace('.', ',')
+    quando = formatar_data_hora(inicio)
+    valor = formatar_reais(centavos)
     dados = {'sessao_id': sessao_id}
     return [
-        # So aqui o profissional fica sabendo: consulta sem pagamento nao conta como marcada
+        # Só aqui o profissional fica sabendo: consulta sem pagamento não conta como marcada
         notificacoes_service.notificar(cur, profissional_id, 'PAGAMENTO_CONFIRMADO', 'Nova consulta confirmada',
                                        f'{nome_paciente} pagou a consulta de {quando}.', dados),
         notificacoes_service.notificar(cur, paciente_id, 'PAGAMENTO_RECEBIDO', 'Comprovante de pagamento',
@@ -350,9 +375,10 @@ def _sessao_paga(cur, sessao_id, profissional_id, inicio, metodo, id_arkhe):
 
 
 def financeiro(papel, dias):
+    """Saldo, dados da conta, resumo e extrato da conta da plataforma na Arkhé, nos últimos `dias`."""
     if papel not in ('PSICOLOGO', 'PSIQUIATRA'):
         raise ErroNegocio('Somente profissionais podem ver o financeiro', 403)
-    # 365 alimenta o historico mensal da carteira
+    # 365 alimenta o histórico mensal da carteira
     if dias not in ('7', '30', '90', '365'):
         raise ErroNegocio('dias deve ser 7, 30, 90 ou 365')
 
@@ -392,7 +418,8 @@ def financeiro(papel, dias):
 
 
 def _conta(conta):
-    # So o necessario para exibir; a Arkhé manda numero_conta como inteiro
+    # Só o necessário para exibir (o número da conta sai só com os 4 últimos dígitos);
+    # a Arkhé manda numero_conta como inteiro
     nome, agencia, numero = (str(conta.get(campo) or '') for campo in ('nome', 'agencia', 'numero_conta'))
     if not numero:
         return None
@@ -400,6 +427,8 @@ def _conta(conta):
 
 
 def _numero(valor):
+    """Valor numérico vindo da Arkhé -> float, ou None se não for um número finito."""
+    # True e False também são números em Python (1 e 0): não valem como dinheiro
     if isinstance(valor, bool):
         return None
     try:
@@ -410,6 +439,7 @@ def _numero(valor):
 
 
 def _movimentacao(item):
+    """Uma linha do extrato da Arkhé no formato do dashboard, ou None se ela veio malformada."""
     if not isinstance(item, dict):
         return None
     valor = _numero(item.get('valor'))

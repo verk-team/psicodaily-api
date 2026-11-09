@@ -1,73 +1,90 @@
+"""Salas da videochamada: guarda quem está em cada sala e repassa as mensagens do WebRTC entre os dois lados.
+
+WebRTC é a tecnologia do navegador que faz a chamada de vídeo direto entre os dois computadores. Antes de
+conectar, cada lado precisa mandar ao outro:
+- offer / answer: a "proposta" de conexão (formatos de áudio e vídeo) e a resposta do outro lado;
+- ice-candidate: os endereços de rede por onde o outro lado pode tentar chegar.
+O servidor não entende essas mensagens: só repassa para os outros da sala.
+
+As salas ficam na memória deste processo. Por isso o servidor roda num processo só: com dois, cada um teria
+as suas salas, e os dois participantes poderiam cair em processos diferentes sem se enxergar.
+"""
 import json
 import threading
 
 from simple_websocket import ConnectionClosed
 
-RELAYED = {"offer", "answer", "ice-candidate"}
+# Tipos de mensagem que um participante pode mandar para os outros; qualquer outro tipo é ignorado
+TIPOS_REPASSADOS = {"offer", "answer", "ice-candidate"}
 
 
 class SignalingService:
     def __init__(self):
-        # sala -> {ws: participante publico ({id_usuario, nome})}
-        self.rooms = {}
-        # ponytail: um lock para todas as salas e envios; por sala se houver muitas chamadas simultaneas
+        # nome da sala -> {websocket: participante público ({id_usuario, nome})}
+        self.salas = {}
+        # ponytail: um lock para todas as salas e envios; por sala se houver muitas chamadas simultâneas
         self.lock = threading.Lock()
 
-    def presentes(self, room):
+    def presentes(self, nome_da_sala):
+        """ids de quem está na sala agora."""
         with self.lock:
-            return {p["id_usuario"] for p in self.rooms.get(room, {}).values()}
+            return {p["id_usuario"] for p in self.salas.get(nome_da_sala, {}).values()}
 
-    def handle_connection(self, ws, room, participante):
-        self.join(ws, room, participante)
+    def atender(self, ws, nome_da_sala, participante):
+        """Põe o participante na sala e repassa as mensagens dele até a conexão fechar."""
+        self._entrar(ws, nome_da_sala, participante)
         try:
             while True:
-                raw_message = ws.receive()
-                if raw_message is None:
+                mensagem_bruta = ws.receive()
+                if mensagem_bruta is None:
                     break
                 try:
-                    message = json.loads(raw_message)
+                    mensagem = json.loads(mensagem_bruta)
                 except ValueError:
-                    continue
-                if isinstance(message, dict) and message.get("type") in RELAYED:
-                    self.broadcast(ws, room, message)
+                    continue  # não é JSON: ignora
+                if isinstance(mensagem, dict) and mensagem.get("type") in TIPOS_REPASSADOS:
+                    self._repassar(ws, nome_da_sala, mensagem)
         except ConnectionClosed:
             pass
         finally:
-            self.leave(ws, room)
+            self._sair(ws, nome_da_sala)
 
-    def join(self, ws, room, participante):
+    def _entrar(self, ws, nome_da_sala, participante):
         with self.lock:
-            sala = self.rooms.setdefault(room, {})
+            sala = self.salas.setdefault(nome_da_sala, {})
             ja_na_sala = list(sala.values())
             sala[ws] = participante
-            self._send(ws, {"type": "peers", "participantes": ja_na_sala})
-            self._send_others(ws, room, {"type": "peer-joined", **participante})
+            # Quem entrou recebe a lista de quem já estava; os que já estavam ficam sabendo que alguém entrou
+            self._enviar(ws, {"type": "peers", "participantes": ja_na_sala})
+            self._enviar_aos_outros(ws, nome_da_sala, {"type": "peer-joined", **participante})
 
-    def leave(self, ws, room):
+    def _sair(self, ws, nome_da_sala):
         with self.lock:
-            sala = self.rooms.get(room, {})
+            sala = self.salas.get(nome_da_sala, {})
             participante = sala.pop(ws, None)
             if participante:
-                self._send_others(ws, room, {"type": "peer-left", **participante})
+                self._enviar_aos_outros(ws, nome_da_sala, {"type": "peer-left", **participante})
+            # Sala vazia sai da memória
             if not sala:
-                self.rooms.pop(room, None)
+                self.salas.pop(nome_da_sala, None)
 
-    def broadcast(self, sender, room, message):
+    def _repassar(self, remetente, nome_da_sala, mensagem):
         with self.lock:
-            self._send_others(sender, room, message)
+            self._enviar_aos_outros(remetente, nome_da_sala, mensagem)
 
-    def _send_others(self, sender, room, message):
-        for connection in self.rooms.get(room, {}):
-            if connection is not sender:
-                self._send(connection, message)
+    def _enviar_aos_outros(self, remetente, nome_da_sala, mensagem):
+        for conexao in self.salas.get(nome_da_sala, {}):
+            if conexao is not remetente:
+                self._enviar(conexao, mensagem)
 
     @staticmethod
-    def _send(connection, message):
+    def _enviar(conexao, mensagem):
         try:
-            connection.send(json.dumps(message))
+            conexao.send(json.dumps(mensagem))
         except ConnectionClosed:
-            # O receive() dessa conexao vai terminar e chamar leave().
+            # O receive() dessa conexão vai terminar e chamar _sair().
             pass
 
 
+# Uma instância só, compartilhada por todas as conexões
 signaling_service = SignalingService()

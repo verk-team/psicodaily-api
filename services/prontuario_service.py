@@ -1,3 +1,7 @@
+"""Prontuário: o profissional vê o diário de humor e sono de um paciente que ele atende.
+
+Todo acesso é auditado (PRONTUARIO_ACESSO), porque é dado de saúde mental.
+"""
 from datetime import date
 
 from database.db import transacao
@@ -8,8 +12,9 @@ from services.upload_service import upload_service
 
 
 def prontuario(profissional_id, paciente_id, dias, antes):
+    """Dados do paciente, última consulta realizada, resumo do período e uma página de registros."""
     with transacao() as cur:
-        # O vinculo deve existir antes de consultar qualquer dado do paciente.
+        # O vínculo (uma consulta não cancelada entre os dois) precisa existir antes de ler qualquer dado
         cur.execute('''SELECT FIRST 1 1 FROM SESSAO
             WHERE PACIENTE_ID = ? AND PROFISSIONAL_ID = ?
             AND STATUS <> 'CANCELADO' ''', (paciente_id, profissional_id))
@@ -29,14 +34,16 @@ def prontuario(profissional_id, paciente_id, dias, antes):
 
         periodo = evolucao(cur, paciente_id, dias)
 
+        # 21 = os 20 da página + 1 só para saber se existe uma próxima página
         cur.execute(f'''SELECT FIRST 21 {', '.join(COLUNAS)} FROM REGISTRO
             WHERE USUARIO_ID = ? AND CRIADO_EM BETWEEN ? AND ? AND REGISTRO_ID < ?
             ORDER BY REGISTRO_ID DESC''', (paciente_id, inicio_periodo(dias), date.today(), antes))
         pagina = cur.fetchall()
         registros = [serializar(linha) for linha in pagina[:20]]
 
+    nome_paciente = paciente[0]
     return {
-        'paciente': {'id_usuario': paciente_id, 'nome': paciente[0],
+        'paciente': {'id_usuario': paciente_id, 'nome': nome_paciente,
                      'foto_url': upload_service.url_foto_usuario(paciente_id)},
         'ultimaConsulta': {'data': ultima[0].isoformat(), 'status': ultima[1]} if ultima else None,
         **periodo,

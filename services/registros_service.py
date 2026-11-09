@@ -1,11 +1,17 @@
+"""Diário do paciente (tabela REGISTRO): humor, sono, alimentação, exercício, interação e anotação.
+
+O profissional vê os registros pelo prontuário; o resumo do período (evolucao) é usado nas duas telas.
+"""
 from datetime import date, timedelta
 
 from database.db import transacao
 from services.erros import ErroNegocio
 
+# Humor em número, para calcular médias e montar o gráfico
 ESCALA_HUMOR = {'PESSIMO': 1, 'RUIM': 2, 'NEUTRO': 3, 'BOM': 4, 'EXCELENTE': 5}
 PERIODOS_DIAS = (7, 30, 90)
 
+# Valores aceitos em cada campo de opção
 DOMINIOS = {
     'humor': {'PESSIMO', 'RUIM', 'NEUTRO', 'BOM', 'EXCELENTE'},
     'qualidade_sono': {'RUIM', 'REGULAR', 'BOA', 'EXCELENTE'},
@@ -17,6 +23,7 @@ COLUNAS = ('registro_id', 'usuario_id', 'humor', 'qualidade_sono',
 
 
 def serializar(linha):
+    """Linha do REGISTRO -> dicionário. A anotação é BLOB e pode chegar como arquivo: lê o texto."""
     registro = dict(zip(COLUNAS, linha))
     if hasattr(registro['anotacao'], 'read'):
         registro['anotacao'] = registro['anotacao'].read()
@@ -26,6 +33,7 @@ def serializar(linha):
 
 
 def validar(dados):
+    """Devolve a mensagem de erro, ou None se o registro está válido."""
     if not isinstance(dados, dict):
         return 'Envie um objeto JSON'
     permitidos = set(COLUNAS) - {'registro_id', 'usuario_id', 'criado_em'}
@@ -49,7 +57,9 @@ def validar(dados):
 
 
 def listar(usuario_id, limite, antes):
+    """Registros com id menor que `antes`, dos mais novos para os mais antigos."""
     with transacao() as cur:
+        # Busca um a mais que o limite só para saber se existe uma próxima página
         cur.execute(f"""SELECT FIRST ? {', '.join(COLUNAS)} FROM REGISTRO
             WHERE USUARIO_ID = ? AND REGISTRO_ID < ?
             ORDER BY REGISTRO_ID DESC""", (limite + 1, usuario_id, antes))
@@ -85,27 +95,30 @@ def evolucao(cur, usuario_id, dias):
         ORDER BY CRIADO_EM, REGISTRO_ID''', (usuario_id, inicio_periodo(dias), date.today()))
     linhas = cur.fetchall()
 
+    # Notas de humor agrupadas por dia: {'2026-11-09': [4, 5], ...}
     por_dia = {}
-    for linha in linhas:
-        if linha[1] in ESCALA_HUMOR:
-            por_dia.setdefault(linha[0].isoformat(), []).append(ESCALA_HUMOR[linha[1]])
-    valores = [ESCALA_HUMOR[linha[1]] for linha in linhas if linha[1] in ESCALA_HUMOR]
-    sono = [linha[2] for linha in linhas if linha[2] is not None]
+    for criado_em, humor, _, _ in linhas:
+        if humor in ESCALA_HUMOR:
+            por_dia.setdefault(criado_em.isoformat(), []).append(ESCALA_HUMOR[humor])
+    valores = [ESCALA_HUMOR[humor] for _, humor, _, _ in linhas if humor in ESCALA_HUMOR]
+    sono = [minutos for _, _, minutos, _ in linhas if minutos is not None]
 
     return {
         'resumo': {
             'totalRegistros': len(linhas),
-            'diasRegistrados': len({linha[0] for linha in linhas}),
+            'diasRegistrados': len({criado_em for criado_em, _, _, _ in linhas}),
             'humorMedio': sum(valores) / len(valores) if valores else None,
             'minutosSonoMedio': sum(sono) / len(sono) if sono else None,
-            'registrosComExercicio': sum(linha[3] is True or linha[3] == 1 for linha in linhas),
+            # Somar True conta quantos são True (True vale 1)
+            'registrosComExercicio': sum(exercicio is True or exercicio == 1 for _, _, _, exercicio in linhas),
         },
-        'evolucaoHumor': [{'data': dia, 'valor': sum(v) / len(v), 'quantidade': len(v)}
-                          for dia, v in por_dia.items()],
+        'evolucaoHumor': [{'data': dia, 'valor': sum(notas) / len(notas), 'quantidade': len(notas)}
+                          for dia, notas in por_dia.items()],
     }
 
 
 def evolucao_paciente(usuario_id, dias):
+    """O resumo do período para o próprio paciente."""
     if dias not in PERIODOS_DIAS:
         raise ErroNegocio('dias deve ser 7, 30 ou 90')
     with transacao() as cur:
