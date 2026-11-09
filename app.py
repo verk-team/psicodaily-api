@@ -22,14 +22,14 @@ from view.assinaturas import assinaturas_bp
 from view.assistente import assistente_bp
 from view.auth import auth_bp
 from view.chat import chat_bp
-from view.consultas import cons_bp
+from view.consultas import consultas_bp
 from view.dashboard import dashboard_bp
-from view.encaminhamentos import encam_bp
+from view.encaminhamentos import encaminhamentos_bp
 from view.favoritos import favoritos_bp
 from view.lista_espera import lista_espera_bp
 from view.notificacoes import notificacoes_bp
 from view.pagamentos import pagamentos_bp
-from view.profissionais import prof_bp
+from view.profissionais import profissionais_bp
 from view.prontuario import prontuario_bp
 from view.registros import registros_bp
 from view.signaling import signaling_bp
@@ -47,9 +47,9 @@ BLUEPRINTS = (
     usuarios_bp,
     registros_bp,
     prontuario_bp,
-    prof_bp,
-    cons_bp,
-    encam_bp,
+    profissionais_bp,
+    consultas_bp,
+    encaminhamentos_bp,
     pagamentos_bp,
     artigos_bp,
     favoritos_bp,
