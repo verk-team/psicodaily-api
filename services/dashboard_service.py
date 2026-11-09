@@ -1,3 +1,4 @@
+"""Tela inicial do app (GET /api/dashboard/): junta numa chamada o que o paciente ou o profissional vê primeiro."""
 from datetime import date, datetime
 
 from database.db import transacao
@@ -12,10 +13,12 @@ def montar(usuario_id, papel):
     if papel not in ('PACIENTE', 'PSICOLOGO', 'PSIQUIATRA'):
         raise ErroNegocio('Painel exclusivo de pacientes e profissionais', 403)
 
-    # ponytail: filtra a lista completa de sessoes em Python; SELECT proprio se o historico crescer muito
+    # ponytail: filtra a lista completa de sessões em Python; SELECT próprio se o histórico crescer muito
+    # Datas em texto ISO ('2026-11-09T14:00:00') dão para comparar como texto: a ordem é a mesma do tempo
     agora = datetime.now().isoformat()
     futuras = [s for s in consultas_service.listar(usuario_id, papel)
                if s['status'] in ('AGENDADO', 'CONFIRMADO') and s['data_hora_inicio'] >= agora]
+    # listar() vem da mais nova para a mais antiga: [::-1] inverte, e as 5 primeiras são as mais próximas
     painel = {'papel': papel, 'proximas_sessoes': futuras[::-1][:PROXIMAS]}
 
     with transacao() as cur:
@@ -32,6 +35,7 @@ def montar(usuario_id, papel):
                  'status': status, 'criado_em': criado.isoformat(), 'pago_em': pago.isoformat() if pago else None}
                 for cobranca, metodo, sessao_id, valor, status, criado, pago in cur.fetchall()]
         else:
+            # Profissional: ganhos e atendimentos do mês corrente e total de pacientes
             inicio_mes = datetime.combine(date.today().replace(day=1), datetime.min.time())
             cur.execute('''SELECT SUM(p.VALOR_CENTAVOS) FROM PAGAMENTO p JOIN SESSAO s ON s.SESSAO_ID = p.SESSAO_ID
                 WHERE s.PROFISSIONAL_ID = ? AND p.STATUS = 'PAGO' AND p.PAGO_EM >= ?

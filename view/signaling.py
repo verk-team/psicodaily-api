@@ -40,7 +40,7 @@ def signaling(ws):
         avisar_entrada_na_sala(sala, id_usuario, signaling_service.presentes(nome_da_sala))
         participante = sala['participantes'][id_usuario]
         # O e-mail fica no servidor: na sala, cada um só fica sabendo o id e o nome do outro
-        signaling_service.handle_connection(ws, nome_da_sala, {'id_usuario': id_usuario, 'nome': participante['nome']})
+        signaling_service.atender(ws, nome_da_sala, {'id_usuario': id_usuario, 'nome': participante['nome']})
     except Exception as e:
         print("ERRO WS:", repr(e))
         ws.close()

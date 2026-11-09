@@ -1,3 +1,8 @@
+"""Artigos escritos pelos profissionais do plano Premium, com curtidas.
+
+No banco a tabela se chama CONTEUDO; na API o nome é artigo. O texto (corpo) é Markdown, um jeito de
+formatar texto com símbolos simples (# título, **negrito**), que o front transforma em HTML.
+"""
 import re
 
 from database.db import transacao
@@ -6,13 +11,14 @@ from services.erros import ErroNegocio
 from services.upload_service import upload_service
 
 LIMITES = {'titulo': (3, 200), 'subtitulo': (3, 300), 'corpo': (1, 20000)}
-# Markdown sem HTML: o front renderiza o Markdown, entao tag HTML e recusada (XSS)
+# Markdown sem HTML: o front renderiza o Markdown, então tag HTML é recusada. Sem isso, um autor poderia
+# esconder um <script> no artigo e ele rodaria no navegador de quem lê (ataque XSS)
 TAG_HTML = re.compile(r'<\s*/?\s*[a-zA-Z!]')
 TAMANHO_PAGINA, MAXIMO_PAGINA, MAXIMO_NUMERO_PAGINA = 10, 50, 100000
 ORDEM = 'ORDER BY c.PUBLICADO_EM DESC, c.CONTEUDO_ID DESC'
 
-# Artigo no ar = autor ativo com Premium valido (divulgacao do plano 9). Abaixo dele o artigo fica guardado, fora do ar.
-# A tabela se chama CONTEUDO desde a feature 8; na API o nome e artigo.
+# Artigo no ar = autor ativo com Premium válido (artigos são um benefício do Premium). Se o autor sai do
+# Premium, o artigo fica guardado, fora do ar, e volta se ele assinar de novo.
 ORIGEM = '''FROM CONTEUDO c
     JOIN USUARIO u ON u.ID_USUARIO = c.PROFISSIONAL_ID
     JOIN ASSINATURA a ON a.PROFISSIONAL_ID = c.PROFISSIONAL_ID
@@ -43,6 +49,7 @@ def _serializar(linha):
 
 
 def _inteiro(args, nome, padrao, maximo):
+    """Parâmetro inteiro da query string, de 1 a `maximo`."""
     try:
         valor = int(args.get(nome, padrao))
     except (TypeError, ValueError):
@@ -53,6 +60,7 @@ def _inteiro(args, nome, padrao, maximo):
 
 
 def validar(dados, parcial=False):
+    """Confere título, subtítulo e corpo. parcial=True (edição): só os campos enviados são exigidos."""
     if not isinstance(dados, dict):
         raise ErroNegocio('Envie um objeto JSON')
     if set(dados) - set(LIMITES):
@@ -79,6 +87,7 @@ def listar(usuario_id, args):
     filtro, params = ORIGEM, []
     if 'autor' in args:
         filtro += ' AND c.PROFISSIONAL_ID = ?'
+        # 2147483647: o maior INTEGER do Firebird
         params.append(_inteiro(args, 'autor', None, 2147483647))
     with transacao() as cur:
         cur.execute(f'SELECT FIRST ? SKIP ? {_colunas(False)} {filtro} {ORDEM}',
@@ -91,6 +100,7 @@ def listar(usuario_id, args):
 
 
 def _no_ar(cur, usuario_id, artigo_id):
+    """O artigo completo, se ele está no ar; senão 404."""
     cur.execute(f'SELECT {_colunas(True)} {ORIGEM} AND c.CONTEUDO_ID = ?', (usuario_id, artigo_id))
     linha = cur.fetchone()
     if linha is None:
@@ -111,6 +121,7 @@ def destaques(limite):
 
 
 def criar(profissional_id, dados):
+    """Publica um artigo (exige o plano Premium)."""
     limpos = validar(dados)
     with transacao() as cur:
         assinaturas_service.exigir(cur, profissional_id, 'PREMIUM')
@@ -120,6 +131,7 @@ def criar(profissional_id, dados):
 
 
 def atualizar(profissional_id, artigo_id, dados):
+    """O autor edita o próprio artigo (exige o plano Premium)."""
     limpos = validar(dados, parcial=True)
     definicoes = ', '.join(f'{campo.upper()} = ?' for campo in limpos)
     with transacao() as cur:

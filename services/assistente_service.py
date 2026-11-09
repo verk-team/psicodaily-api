@@ -1,3 +1,10 @@
+"""Assistente virtual (o "Psicosinho"): conversa com o paciente no site e no WhatsApp usando o Gemini.
+
+Como funciona (tool calling): o modelo recebe a conversa e uma lista de ferramentas (FERRAMENTAS). Em vez de
+inventar dados, ele pede para chamar uma ferramenta (ex.: buscar_profissionais); o servidor roda a função de
+verdade e devolve o resultado; o modelo então responde. Isso se repete até MAXIMO_RODADAS vezes.
+O assistente nunca grava nada: agendar e cancelar viram uma proposta que o paciente confirma.
+"""
 import json
 import logging
 import os
@@ -14,7 +21,7 @@ from services.erros import ErroNegocio
 logger = logging.getLogger(__name__)
 
 # Gemini no plano gratuito, pelo endpoint no formato da OpenAI (trocado do Groq em 22/10/2026, que era lento).
-# Outro provedor compativel = trocar URL, modelo e a variavel da chave.
+# Outro provedor compatível = trocar URL, modelo e a variável da chave.
 URL_LLM = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
 # Flash-lite: o 3.5 Flash gratis so da 20 requisicoes por dia (03/11/2026), e cada pergunta gasta de 1 a 3;
 # o 3.8 nao aceita 'minimal' e vivia sobrecarregado (503)
@@ -23,12 +30,14 @@ MAXIMO_MENSAGENS = 40
 MAXIMO_CARACTERES = 2000
 MAXIMO_RODADAS = 8
 MAXIMO_HORARIOS = 20
-# No plano gratuito o Gemini devolve 503 (sobrecarga) e 429 (limite por minuto) com frequencia, e costuma passar
-# em segundos. Timeout nao entra: ja esperou 30 s.
+# No plano gratuito o Gemini devolve 503 (sobrecarga) e 429 (limite por minuto) com frequência, e costuma passar
+# em segundos. Timeout não entra: já esperou 30 s.
 ERROS_PASSAGEIROS = {429, 500, 503, 504}
 INDISPONIVEL = 'O assistente está indisponível no momento. Tente novamente em instantes.'
+# Segundos de espera antes da 2ª e da 3ª tentativa
 ESPERAS_NOVA_TENTATIVA = (2, 5)
 
+# Prompt de sistema: as instruções fixas que o modelo recebe antes da conversa (quem ele é, tom, limites)
 SISTEMA = '''Voce e o assistente virtual do PsicoDaily chamado Psicosinho (sempre comece se apresentando caso o user cumprimente), plataforma que conecta pacientes a psicologos e psiquiatras.
 Fale em portugues do Brasil, com tom profissional, cordial e objetivo, como o atendimento de uma clinica:
 - trate o paciente por "voce", sem girias, sem emojis e sem exclamacoes em excesso;
@@ -59,6 +68,7 @@ Limites:
 - Se a pessoa falar em se machucar, suicidio ou risco imediato, oriente a ligar 188 (CVV, 24h) ou 192 (SAMU) agora, antes de qualquer outra coisa.
 - Assuntos fora da plataforma e da saude mental: diga gentilmente que so ajuda com o PsicoDaily.'''
 
+# As ferramentas que o modelo pode pedir. input_schema descreve os argumentos de cada uma (JSON Schema)
 FERRAMENTAS = [
     {
         'name': 'buscar_profissionais',
@@ -129,12 +139,14 @@ FERRAMENTAS = [
         },
     },
 ]
-# Ferramentas que so propoem: a acao fica para o paciente confirmar, e a proposta volta na resposta
+# Ferramentas que só propõem: a ação fica para o paciente confirmar, e a proposta volta na resposta
 PROPOSTAS = {'propor_agendamento': 'agendamento', 'propor_cancelamento': 'cancelamento'}
 
+# As mesmas ferramentas no formato que o endpoint da OpenAI espera
 FERRAMENTAS_API = [{'type': 'function', 'function': {'name': f['name'], 'description': f['description'],
                                                      'parameters': f['input_schema']}} for f in FERRAMENTAS]
 
+# Os campos de cada item que vão para o modelo (o resto fica de fora)
 CAMPOS_PROFISSIONAL = ('id_usuario', 'nome', 'especialidade', 'abordagem', 'modalidade', 'preco_centavos',
                        'avaliacao', 'total_avaliacoes', 'areas_atuacao', 'idiomas', 'anos_experiencia')
 CAMPOS_CONSULTA = ('sessao_id', 'profissional_nome', 'data_hora_inicio', 'data_hora_fim', 'status', 'valor_centavos')
@@ -150,12 +162,13 @@ def _chamar(mensagens):
         'Content-Type': 'application/json',
         'User-Agent': 'psicodaily-api',
     })
+    # Até 3 tentativas: espera 2 s, depois 5 s; na última (espera None) não tenta mais
     for espera in (*ESPERAS_NOVA_TENTATIVA, None):
         try:
             with urlopen(req, timeout=30) as resposta:
                 return json.load(resposta)['choices'][0]['message']
         except HTTPError as erro:
-            # O corpo diz qual limite estourou (por minuto ou por dia); sem isso nao da para escolher a correcao
+            # O corpo diz qual limite estourou (por minuto ou por dia); sem isso não dá para escolher a correção
             logger.warning('Gemini respondeu %s: %s', erro.code, erro.read(500).decode(errors='replace'))
             if erro.code == 429 and espera is None:
                 raise ErroNegocio('O assistente está com muitas solicitações no momento. Tente novamente em alguns minutos.', 503)
@@ -169,14 +182,16 @@ def _chamar(mensagens):
 
 
 def _resumo(itens, campos):
+    """Cada item só com os `campos` escolhidos."""
     return [{campo: item.get(campo) for campo in campos} for item in itens]
 
 
 def _propor(id_profissional, inicio, fim):
+    """Proposta de agendamento, só se o horário está livre. Não agenda: o paciente confirma depois."""
     inicio_dt, _ = consultas_service.ler_intervalo(inicio, fim)
     dia = inicio_dt.date().isoformat()
     livres = disponibilidade_service.horarios_livres(id_profissional, dia, dia)['horarios']
-    # Vale o horario exato que a agenda devolveu; o POST /api/consultas revalida tudo na confirmacao.
+    # Vale o horário exato que a agenda devolveu; o POST /api/consultas revalida tudo na confirmação
     if not any(h['inicio'] == inicio[:16] and h['fim'] == fim[:16] for h in livres):
         # Os livres vao junto para o modelo corrigir sem gastar outra rodada com horarios_livres
         raise ErroNegocio(f'Horario nao esta livre. Livres neste dia: {json.dumps(livres[:MAXIMO_HORARIOS])}')
@@ -184,11 +199,13 @@ def _propor(id_profissional, inicio, fim):
 
 
 def _quando(texto_iso):
+    """'2026-11-09T14:00' -> '09/11 às 14:00'."""
     momento = datetime.fromisoformat(texto_iso)
     return f'{momento:%d/%m} às {momento:%H:%M}'
 
 
 def _texto_da_proposta(tipo, proposta):
+    """A frase fixa que acompanha a proposta de agendamento ou de cancelamento."""
     if tipo == 'agendamento':
         return f'O horário de {_quando(proposta["timestamp_inicio"])} está livre.'
     reembolso = ', com reembolso integral do que você pagou' if proposta['reembolso_integral'] else ''
@@ -199,7 +216,7 @@ def executar_ferramenta(nome, entrada, paciente_id):
     """Roda uma ferramenta pedida pelo modelo. O paciente vem sempre do token, nunca da entrada."""
     if nome == 'buscar_profissionais':
         filtros = {campo: str(valor) for campo, valor in entrada.items()}
-        # A ordem padrao da busca poe o Premium primeiro; o assistente indica sem considerar patrocinio
+        # A ordem padrão da busca põe o Premium primeiro; o assistente indica sem considerar patrocínio
         pedido = {'ordenar': 'avaliacao', **filtros, 'page_size': 5}
         return _resumo(profissionais_service.buscar(pedido)['profissionais'], CAMPOS_PROFISSIONAL)
     if nome == 'recomendados':
@@ -219,6 +236,7 @@ def executar_ferramenta(nome, entrada, paciente_id):
 
 
 def _validar(dados):
+    """Confere o histórico enviado pelo front: só mensagens de user e assistant, começando e terminando no user."""
     if not isinstance(dados, dict) or set(dados) != {'mensagens'}:
         raise ErroNegocio('Envie {"mensagens": [{"role": "user", "content": "..."}]}')
     mensagens = dados['mensagens']
@@ -236,6 +254,7 @@ def _validar(dados):
 
 
 def conversar(paciente_id, papel, dados):
+    """Uma resposta do assistente para a conversa, com as propostas de agendamento e cancelamento (ou None)."""
     if papel != 'PACIENTE':
         raise ErroNegocio('Assistente disponivel apenas para pacientes', 403)
     sistema = f'{SISTEMA}\n\nHoje: {date.today().isoformat()}'
@@ -248,7 +267,8 @@ def conversar(paciente_id, papel, dados):
         if not chamadas:
             return {'resposta': resposta.get('content') or '', **propostas}
 
-        # So os campos do protocolo voltam; campos extras do provedor (ex.: reasoning) podem dar 400. Os tool_calls
+        # O modelo pediu ferramentas: a resposta dele entra no histórico e cada ferramenta roda.
+        # Só os campos do protocolo voltam; campos extras do provedor (ex.: reasoning) podem dar 400. Os tool_calls
         # voltam intactos: no Gemini 3 eles levam a thought signature (extra_content), exigida na rodada seguinte.
         mensagens.append({'role': 'assistant', 'content': resposta.get('content') or '', 'tool_calls': chamadas})
         for chamada in chamadas:
@@ -261,12 +281,12 @@ def conversar(paciente_id, papel, dados):
             except ErroNegocio as erro:
                 conteudo = f'Erro: {erro.mensagem}'
             except (ValueError, KeyError, TypeError):
-                # Argumentos fora do schema: o modelo ve o erro e tenta de novo
+                # Argumentos fora do schema: o modelo vê o erro e tenta de novo
                 conteudo = 'Erro: argumentos invalidos para esta ferramenta'
             mensagens.append({'role': 'tool', 'tool_call_id': chamada['id'], 'name': nome, 'content': conteudo})
 
-        # Com a proposta pronta, a resposta e fixa: o site e o WhatsApp ja mostram a confirmacao, e o modelo nao gasta
-        # mais uma chamada do limite por minuto so para dizer "confirme abaixo"
+        # Com a proposta pronta, a resposta é fixa: o site e o WhatsApp já mostram a confirmação, e o modelo não gasta
+        # mais uma chamada do limite por minuto só para dizer "confirme abaixo"
         textos = [_texto_da_proposta(tipo, proposta) for tipo, proposta in propostas.items() if proposta]
         if textos:
             return {'resposta': ' '.join(textos), **propostas}
@@ -274,8 +294,11 @@ def conversar(paciente_id, papel, dados):
     raise ErroNegocio('O assistente nao concluiu a resposta, tente reformular a pergunta', 502)
 
 
-# WhatsApp (12 e 31): o mesmo assistente, com historico por numero em memoria (processo unico, como o chat).
-# ponytail: o historico some no restart do servidor; tabela se precisar guardar conversas
+# ---------------------------------------------------------------------------
+# WhatsApp: o mesmo assistente, com o histórico de cada número em memória (processo único, como o chat).
+# Lá não tem botão: a proposta fica pendente e o paciente confirma respondendo SIM.
+# ponytail: o histórico some no restart do servidor; tabela se precisar guardar conversas
+# ---------------------------------------------------------------------------
 TTL_CONVERSA = timedelta(hours=2)
 MAXIMO_HISTORICO = 20
 SIM = {'sim', 's', 'confirmo', 'confirmar', 'ok', 'pode'}
@@ -298,6 +321,7 @@ def receber_whatsapp(evento):
 
 
 def responder_whatsapp(remetente, texto):
+    """Roda em segundo plano: descobre quem mandou, gera a resposta e envia pelo WhatsApp."""
     telefone = whatsapp_service.telefone_do_remetente(remetente)
     usuario = whatsapp_service.usuario_por_telefone(telefone) if telefone else None
     try:
@@ -311,6 +335,7 @@ def responder_whatsapp(remetente, texto):
 
 
 def _responder(usuario, chave, texto):
+    """A resposta para uma mensagem do WhatsApp. `chave` identifica a conversa (o número de quem mandou)."""
     if usuario is None:
         site = os.getenv('FRONT_URL', 'https://psicodaily-front.vercel.app')
         return f'Não encontrei este número no PsicoDaily. Cadastre-se em {site} com este telefone para conversar comigo por aqui.'
@@ -318,6 +343,7 @@ def _responder(usuario, chave, texto):
     if papel != 'PACIENTE':
         return 'Por aqui eu atendo pacientes. Os avisos das suas consultas continuam chegando neste número.'
 
+    # Pega (ou recomeça, se expirou) a conversa do número e já tira a proposta pendente dela
     with _conversas_lock:
         conversa = _conversas.get(chave)
         if conversa is None or conversa['expira'] < datetime.now():
@@ -332,6 +358,7 @@ def _responder(usuario, chave, texto):
     if pendente and curta in NAO:
         return 'Tudo bem, não fiz nada.'
 
+    # Só as últimas mensagens; a conversa precisa começar por uma mensagem do paciente
     historico = (conversa['mensagens'] + [{'role': 'user', 'content': texto}])[-MAXIMO_HISTORICO:]
     while historico[0]['role'] != 'user':
         historico.pop(0)

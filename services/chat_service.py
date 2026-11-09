@@ -1,3 +1,8 @@
+"""Chat entre paciente e profissional: mensagens de texto, anexos e o aviso em tempo real pelo WebSocket.
+
+Só conversa quem tem vínculo: uma consulta não cancelada entre os dois. Os anexos ficam no bucket privado do R2
+e só são baixados por um link temporário (URL assinada).
+"""
 import json
 import threading
 import uuid
@@ -9,18 +14,19 @@ from services.erros import ErroNegocio
 from services.upload_service import upload_service
 
 MAXIMO_TEXTO = 2000
-MAXIMO_ARQUIVO = 10 * 1024 * 1024
-# O tipo vem dos primeiros bytes, nao do nome nem do Content-Type que o cliente manda
+MAXIMO_ARQUIVO = 10 * 1024 * 1024  # 10 MB
+# O tipo do arquivo vem dos primeiros bytes dele (a "assinatura" do formato), não do nome nem do Content-Type
+# que o cliente manda: assim ninguém sobe um programa renomeado para .pdf
 ASSINATURAS = {b'%PDF-': ('application/pdf', '.pdf'), b'\x89PNG\r\n\x1a\n': ('image/png', '.png'),
                b'\xff\xd8\xff': ('image/jpeg', '.jpg'),
-               # Audio: OGG (WhatsApp), WebM (gravador do Chrome/Firefox), MP3 com e sem etiqueta ID3
+               # Áudio: OGG (WhatsApp), WebM (gravador do Chrome/Firefox), MP3 com e sem etiqueta ID3
                b'OggS': ('audio/ogg', '.ogg'), b'\x1aE\xdf\xa3': ('audio/webm', '.webm'),
                b'ID3': ('audio/mpeg', '.mp3'), b'\xff\xfb': ('audio/mpeg', '.mp3'), b'\xff\xf3': ('audio/mpeg', '.mp3')}
-VALIDADE_URL = 300
+VALIDADE_URL = 300  # segundos que o link de download vale
 COLUNAS = 'MENSAGEM_ID, REMETENTE_ID, TEXTO, LIDA, CRIADO_EM, ARQUIVO_NOME, ARQUIVO_TIPO, ARQUIVO_TAMANHO'
 
-# usuario_id -> WebSockets abertos (abas e aparelhos). Em memoria, como as salas do signaling: exige processo unico.
-# ponytail: um lock para todas as conexoes e envios; por usuario se houver muitos conectados
+# usuario_id -> WebSockets abertos (abas e aparelhos). Em memória, como as salas do signaling: exige processo único.
+# ponytail: um lock para todas as conexões e envios; por usuário se houver muitos conectados
 _conexoes = {}
 _lock = threading.Lock()
 
@@ -56,6 +62,7 @@ def conversas(usuario_id, papel):
     """Todos com quem ha vinculo, com a ultima mensagem e quantas recebidas nao foram lidas."""
     eu, outro = _colunas(papel)
     with transacao() as cur:
+        # v: as pessoas com vínculo; r: a última mensagem e as não lidas de cada conversa; m: a última mensagem
         cur.execute(f'''SELECT v.OUTRO, u.NOME, COALESCE(r.NAO_LIDAS, 0), m.MENSAGEM_ID, m.REMETENTE_ID, m.TEXTO,
                 m.LIDA, m.CRIADO_EM, m.ARQUIVO_NOME, m.ARQUIVO_TIPO, m.ARQUIVO_TAMANHO
             FROM (SELECT DISTINCT {outro} AS OUTRO FROM SESSAO WHERE {eu} = ? AND STATUS <> 'CANCELADO') v
@@ -66,9 +73,12 @@ def conversas(usuario_id, papel):
             LEFT JOIN MENSAGEM m ON m.MENSAGEM_ID = r.ULTIMA
             ORDER BY m.MENSAGEM_ID DESC NULLS LAST, u.NOME''', (usuario_id, usuario_id, usuario_id))
         linhas = cur.fetchall()
-    return [{'id_usuario': outro_id, 'nome': nome, 'foto_url': upload_service.url_foto_usuario(outro_id),
-             'nao_lidas': nao_lidas, 'ultima_mensagem': _mensagem(*ultima) if ultima[0] else None}
-            for outro_id, nome, nao_lidas, *ultima in linhas]
+    resultado = []
+    # `*ultima` junta as colunas da última mensagem; sem mensagem ainda, todas vêm NULL
+    for outro_id, nome, nao_lidas, *ultima in linhas:
+        resultado.append({'id_usuario': outro_id, 'nome': nome, 'foto_url': upload_service.url_foto_usuario(outro_id),
+                          'nao_lidas': nao_lidas, 'ultima_mensagem': _mensagem(*ultima) if ultima[0] else None})
+    return resultado
 
 
 def mensagens(usuario_id, papel, outro_id, limite, antes=None, depois=None):
@@ -89,6 +99,7 @@ def mensagens(usuario_id, papel, outro_id, limite, antes=None, depois=None):
             WHERE PACIENTE_ID = ? AND PROFISSIONAL_ID = ? AND REMETENTE_ID <> ? AND LIDA = FALSE''',
                     (paciente_id, profissional_id, usuario_id))
     itens = [_mensagem(*linha) for linha in linhas]
+    # A busca DESC pega as mais novas primeiro; [::-1] inverte para a ordem cronológica
     return itens if ordem == 'ASC' else itens[::-1]
 
 
@@ -100,6 +111,7 @@ def _texto(texto, minimo=1):
 
 
 def _gravar(cur, usuario_id, paciente_id, profissional_id, texto, arquivo=(None, None, None, None)):
+    """Grava a mensagem. `arquivo` = (chave no bucket, nome, tipo, tamanho), ou tudo None se for só texto."""
     cur.execute(f'''INSERT INTO MENSAGEM (PACIENTE_ID, PROFISSIONAL_ID, REMETENTE_ID, TEXTO,
             ARQUIVO_CHAVE, ARQUIVO_NOME, ARQUIVO_TIPO, ARQUIVO_TAMANHO) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING {COLUNAS}''', (paciente_id, profissional_id, usuario_id, texto, *arquivo))
@@ -107,13 +119,14 @@ def _gravar(cur, usuario_id, paciente_id, profissional_id, texto, arquivo=(None,
 
 
 def _publicar(paciente_id, profissional_id, mensagem):
-    # Depois do commit; quem estiver desconectado ve no GET (nao_lidas / depois=)
+    # Depois do commit; quem estiver desconectado vê no GET (nao_lidas / depois=)
     _avisar((paciente_id, profissional_id), {'type': 'mensagem', 'paciente_id': paciente_id,
                                              'profissional_id': profissional_id, 'mensagem': mensagem})
     return mensagem
 
 
 def enviar(usuario_id, papel, outro_id, dados):
+    """Envia uma mensagem de texto e avisa os dois lados pelo WebSocket."""
     if not isinstance(dados, dict) or set(dados) != {'texto'}:
         raise ErroNegocio('Envie apenas texto')
     texto = _texto(dados['texto'])
@@ -124,16 +137,18 @@ def enviar(usuario_id, papel, outro_id, dados):
 
 
 def _tipo_do_arquivo(conteudo):
-    # M4A (iPhone, Safari) e um MP4: a marca 'ftyp' vem depois dos 4 bytes de tamanho, entao nao cabe em ASSINATURAS
+    """(tipo MIME, extensão) pelos primeiros bytes do arquivo, ou (None, None) se não for um formato aceito."""
+    # M4A (iPhone, Safari) é um MP4: a marca 'ftyp' vem depois dos 4 bytes de tamanho, então não cabe em ASSINATURAS
     if conteudo[4:8] == b'ftyp':
         return 'audio/mp4', '.m4a'
     return next((tipo for assinatura, tipo in ASSINATURAS.items() if conteudo.startswith(assinatura)), (None, None))
 
 
 def enviar_arquivo(usuario_id, papel, outro_id, nome, arquivo, texto=''):
-    """Anexo PDF, JPG, PNG ou audio de ate 10 MB, com legenda opcional, no bucket privado (F6)."""
+    """Anexo PDF, JPG, PNG ou audio de ate 10 MB, com legenda opcional, no bucket privado."""
     if arquivo is None:
         raise ErroNegocio('Envie o arquivo no campo "arquivo"')
+    # Lê 1 byte a mais que o limite: se conseguiu ler, o arquivo passou do tamanho
     conteudo = arquivo.read(MAXIMO_ARQUIVO + 1)
     if len(conteudo) > MAXIMO_ARQUIVO:
         raise ErroNegocio('O arquivo deve ter no maximo 10 MB', 413)
@@ -141,13 +156,14 @@ def enviar_arquivo(usuario_id, papel, outro_id, nome, arquivo, texto=''):
     if tipo is None:
         raise ErroNegocio('Envie um arquivo PDF, JPG, PNG ou de áudio (MP3, M4A, OGG, WebM)')
     texto = _texto(texto or '', minimo=0)
-    # Nome so para exibir: sem pastas do aparelho de quem enviou
+    # Nome só para exibir: sem as pastas do aparelho de quem enviou ('C:\\fotos\\a.jpg' -> 'a.jpg')
     nome = (nome or '').replace('\\', '/').rsplit('/', 1)[-1].strip()[:200] or f'arquivo{extensao}'
 
     with transacao() as cur:
         paciente_id, profissional_id = _par(cur, usuario_id, papel, outro_id)
-    # Upload fora da transacao para nao segurar uma conexao do pool durante a transferencia.
-    # ponytail: se o INSERT falhar depois do upload, o objeto fica orfao no bucket; limpar por job (F7) se acontecer
+    # Upload fora da transação para não segurar uma conexão do pool durante a transferência.
+    # ponytail: se o INSERT falhar depois do upload, o objeto fica órfão no bucket; limpar por job se acontecer
+    # uuid4: um nome aleatório, para ninguém adivinhar a chave de um arquivo
     chave = f'chat/{paciente_id}-{profissional_id}/{uuid.uuid4().hex}{extensao}'
     upload_service.enviar_privado(conteudo, chave, tipo)
     with transacao() as cur:
@@ -161,18 +177,21 @@ def url_do_arquivo(usuario_id, mensagem_id):
         cur.execute('''SELECT ARQUIVO_CHAVE, ARQUIVO_NOME, ARQUIVO_TIPO FROM MENSAGEM
             WHERE MENSAGEM_ID = ? AND (PACIENTE_ID = ? OR PROFISSIONAL_ID = ?)''', (mensagem_id, usuario_id, usuario_id))
         arquivo = cur.fetchone()
+    # Mensagem de outra conversa, que não existe ou que é só texto: o mesmo 404
     if arquivo is None or arquivo[0] is None:
         raise ErroNegocio('Arquivo nao encontrado', 404)
-    return {'url': upload_service.url_assinada(*arquivo, VALIDADE_URL), 'nome': arquivo[1],
+    chave, nome, tipo = arquivo
+    return {'url': upload_service.url_assinada(chave, nome, tipo, VALIDADE_URL), 'nome': nome,
             'expira_em_segundos': VALIDADE_URL}
 
 
 def manter_conexao(usuario_id, papel, ws):
     """Segura o WS do usuario ate fechar; o servidor so empurra mensagens, o cliente envia pelo POST."""
-    _colunas(papel)
+    _colunas(papel)  # só para recusar quem não é paciente nem profissional
     with _lock:
         _conexoes.setdefault(usuario_id, set()).add(ws)
     try:
+        # receive() espera a próxima mensagem do cliente e devolve None quando a conexão fecha
         while ws.receive() is not None:
             pass
     except ConnectionClosed:
@@ -186,10 +205,12 @@ def manter_conexao(usuario_id, papel, ws):
 
 
 def _avisar(usuario_ids, evento):
+    """Manda o evento para todas as conexões abertas desses usuários."""
     texto = json.dumps(evento)
     with _lock:
-        for ws in [ws for usuario_id in usuario_ids for ws in _conexoes.get(usuario_id, ())]:
+        destinos = [ws for usuario_id in usuario_ids for ws in _conexoes.get(usuario_id, ())]
+        for ws in destinos:
             try:
                 ws.send(texto)
             except ConnectionClosed:
-                pass  # o receive() dessa conexao termina e a remove
+                pass  # o receive() dessa conexão termina e a remove
