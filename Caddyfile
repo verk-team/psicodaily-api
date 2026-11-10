@@ -1,0 +1,7 @@
+# HTTPS da API na VPS. O Caddy pede e renova sozinho o certificado no Let's Encrypt
+# (por isso precisa das portas 80 e 443 abertas) e repassa tudo para a api, inclusive
+# os WebSockets de /ws/chat e /ws/signaling. "api" é o nome do serviço no compose:
+# cada container tem a própria rede, então 127.0.0.1 aqui seria o próprio Caddy.
+api.psicodaily.tech {
+	reverse_proxy api:8000
+}

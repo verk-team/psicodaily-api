@@ -1,15 +1,30 @@
+# Push na main: quando o ci.yml termina verde, gera a imagem, manda para o Docker Hub e
+# atualiza a VPS por SSH. Push com teste quebrado não chega à produção.
 name: Build and Deploy
 
 on:
-  push:
-    branches: ['release/*']
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+# Um deploy por vez: dois "compose up" ao mesmo tempo na VPS disputariam o mesmo .FDB
+concurrency: deploy
+
+env:
+  # O commit que o CI testou (github.sha aqui seria o último da main, não necessariamente o testado)
+  COMMIT: ${{ github.event.workflow_run.head_sha }}
 
 jobs:
   build-and-push:
+    # Só push (não PR) e só CI verde
+    if: github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.COMMIT }}
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -22,7 +37,10 @@ jobs:
         with:
           context: .
           push: true
-          tags: cavalliniph/psicodaily-api:latest
+          # latest é a que o compose usa; a do commit fica para voltar a uma versão anterior
+          tags: |
+            cavalliniph/psicodaily-api:latest
+            cavalliniph/psicodaily-api:${{ env.COMMIT }}
 
   deploy:
     runs-on: ubuntu-latest
@@ -35,8 +53,12 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           password: ${{ secrets.VPS_PASSWORD }}
           script: |
+            set -e
             cd /opt/psicodaily-api
-            docker pull cavalliniph/psicodaily-api:latest
-            docker compose -f docker-compose.yml down
-            docker compose -f docker-compose.yml up -d
-          
+            # Compose e Caddyfile do mesmo commit que gerou a imagem (o .env não está no git e fica)
+            git fetch origin
+            git checkout --detach ${{ env.COMMIT }}
+            docker compose pull
+            # Recria só o que mudou (o container antigo para antes de o novo abrir o .FDB);
+            # --wait espera o healthcheck e falha o job se a api não ficar healthy
+            docker compose up -d --wait
