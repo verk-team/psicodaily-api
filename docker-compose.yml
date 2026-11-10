@@ -3,7 +3,9 @@
 
 services:
   api:
-    build: .
+    # Imagem publicada no Docker Hub; a VPS só baixa, não builda
+    image: cavalliniph/psicodaily-api:latest
+    container_name: psicodaily-api
     env_file: .env
     environment:
       # Fica aqui e não no .env porque precisa estar dentro da pasta montada pelo volume
