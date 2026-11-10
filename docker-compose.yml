@@ -1,0 +1,33 @@
+# Sobe a API do PsicoDaily na VPS, com o Firebird dentro do mesmo container.
+# O banco fica no volume firebird-data, então recriar o container não apaga os dados.
+
+services:
+  api:
+    build: .
+    env_file: .env
+    environment:
+      # Fica aqui e não no .env porque precisa estar dentro da pasta montada pelo volume
+      DB_DATABASE: /var/lib/firebird/data/BANCO.FDB
+      # O Firebird roda no mesmo container que a API
+      DB_HOST: 127.0.0.1
+    volumes:
+      # Sem o volume, o banco ficaria no disco do container e sumiria a cada recriação (todo deploy)
+      - firebird-data:/var/lib/firebird/data
+    ports:
+      # O Docker passa por cima do firewall: o 127.0.0.1 deixa só a própria VPS acessar.
+      # A 3050 (Firebird) não é publicada: só a API fala com ele, por dentro do container.
+      - "127.0.0.1:8000:8000"
+    # Volta sozinho se cair ou se a VPS reiniciar, menos quando foi parado de propósito
+    restart: "unless-stopped"
+    healthcheck:
+      # A imagem slim não tem curl; o urlopen termina com erro se /api/saude não responder 200
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/saude')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # Carência para Firebird, backup (gbak) e migrations rodarem antes do gunicorn subir
+      start_period: 60s
+
+volumes:
+  # Vazio = padrão: o Docker cria e guarda o volume na própria VPS
+  firebird-data:
