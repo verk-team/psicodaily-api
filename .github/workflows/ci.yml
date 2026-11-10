@@ -1,6 +1,5 @@
 # Banco do zero (migrations + seed ficticio) e todos os testes de tests/.
-# Nao faz deploy: o Northflank builda a main. Com a main protegida (merge so com este job verde),
-# so codigo testado chega la. Ver F0 em .claude/plans/ultima-sprint.md.
+# Nao faz deploy: quem faz e o deploy.yml, num push em release/*, e ele nao espera este job.
 name: CI
 
 on:

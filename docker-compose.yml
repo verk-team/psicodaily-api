@@ -1,5 +1,6 @@
-# Sobe a API do PsicoDaily na VPS, com o Firebird dentro do mesmo container.
-# O banco fica no volume firebird-data, então recriar o container não apaga os dados.
+# Sobe a API do PsicoDaily na VPS, com o Firebird dentro do mesmo container, e o Caddy
+# na frente com HTTPS (api.psicodaily.tech, ver Caddyfile). O banco fica no volume
+# firebird-data, então recriar o container não apaga os dados.
 
 services:
   api:
@@ -29,7 +30,21 @@ services:
       retries: 3
       # Carência para Firebird, backup (gbak) e migrations rodarem antes do gunicorn subir
       start_period: 60s
+  caddy:
+    image: caddy:2
+    ports:
+      # As únicas portas abertas para a internet: 80 (validação do Let's Encrypt e
+      # redirecionamento) e 443 (HTTPS). A api só é alcançada pela rede do compose.
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificados emitidos: sem o volume, cada recriação pediria um novo e o
+      # Let's Encrypt bloqueia o domínio depois de 5 pedidos iguais na semana.
+      - caddy-data:/data
+    restart: "unless-stopped"
 
 volumes:
   # Vazio = padrão: o Docker cria e guarda o volume na própria VPS
   firebird-data:
+  caddy-data:

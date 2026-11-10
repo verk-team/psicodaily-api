@@ -76,7 +76,7 @@ if os.getenv('JOBS', '1') == '1':
 @app.before_request
 def guardar_ip():
     """Guarda o IP de quem fez a requisição, para a auditoria registrar quem fez cada ação."""
-    # Atrás do proxy do Northflank, o IP real do cliente é o último do cabeçalho X-Forwarded-For
+    # Atrás do Caddy (proxy da VPS), o IP real do cliente é o último do cabeçalho X-Forwarded-For
     IP_ATUAL.set(request.access_route[-1] if request.access_route else request.remote_addr)
 
 
@@ -84,8 +84,8 @@ def guardar_ip():
 def saude():
     """GET /api/saude: diz se a API e o banco estão no ar.
 
-    O Northflank chama esta rota (readiness probe) e só manda tráfego para o servidor quando ela responde 200,
-    ou seja, depois que o banco migrou e está respondendo.
+    O healthcheck do docker-compose.yml chama esta rota, e o deploy (up --wait) só termina bem quando ela
+    responde 200, ou seja, depois que o banco migrou e está respondendo.
     """
     if banco_responde():
         return jsonify({'status': 'ok'})

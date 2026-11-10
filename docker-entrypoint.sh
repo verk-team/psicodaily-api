@@ -1,14 +1,14 @@
 #!/bin/sh
 set -e
 
-# O banco vive no volume do Northflank (padrao /data), fora da imagem: deploy nao apaga dados.
+# O banco vive num volume (padrao /data; na VPS, /var/lib/firebird/data), fora da imagem: deploy nao apaga dados.
 # Ordem: Firebird -> senha -> (banco novo so com CRIAR_BANCO=1) -> backup -> migrations -> gunicorn.
 # Qualquer passo que falhe derruba o container antes de ele receber trafego.
 : "${DB_DATABASE:=/data/BANCO.FDB}"
 : "${DB_HOST:=127.0.0.1}"
 : "${DB_USER:=SYSDBA}"
 if [ -z "$DB_PASSWORD" ]; then
-    echo "AVISO: DB_PASSWORD vazio, usando a senha padrao 'sysdba'. Defina no secret group."
+    echo "AVISO: DB_PASSWORD vazio, usando a senha padrao 'sysdba'. Defina no .env."
     DB_PASSWORD=sysdba
 fi
 export DB_DATABASE DB_HOST DB_USER DB_PASSWORD

@@ -12,8 +12,8 @@ RUN apt-get update \
         tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-# O pacote do Debian deixa o Firebird ouvindo so em localhost, e o tunel do Northflank
-# (DBeaver local) chega pelo IP do container. A porta 3050 e TCP, que o Northflank nunca publica.
+# O pacote do Debian deixa o Firebird ouvindo so em localhost, e uma porta publicada pelo Docker
+# (DBeaver por tunel SSH) chega pelo IP do container. A 3050 nunca e publicada para a internet.
 RUN sed -i 's/^RemoteBindAddress = localhost$/RemoteBindAddress = 0.0.0.0/' /etc/firebird/4.0/firebird.conf \
     && grep -qx 'RemoteBindAddress = 0.0.0.0' /etc/firebird/4.0/firebird.conf
 

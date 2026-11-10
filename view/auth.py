@@ -26,7 +26,7 @@ def _com_cookie(response, token):
         httponly=True,
         # secure: o cookie só viaja por HTTPS
         secure=True,
-        # None: o front (Vercel) e a API (Northflank) estão em domínios diferentes, e o cookie precisa ir mesmo assim
+        # None: o front (Vercel) e a API (VPS) estão em domínios diferentes, e o cookie precisa ir mesmo assim
         samesite="None",
     )
     return response

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 def enviar_email(destinatario, assunto, mensagem, html=None):
     """Envia na hora (a função espera o Gmail). Com `html`, o e-mail leva as duas versões, texto e HTML."""
-    # Credenciais só no ambiente (.env ou Northflank): no código elas vazavam pelo repositório público
+    # Credenciais só no ambiente (.env): no código elas vazavam pelo repositório público
     user = os.getenv('SMTP_USER')
     senha = os.getenv('SMTP_PASSWORD')
     if not user or not senha:

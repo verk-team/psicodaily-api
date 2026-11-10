@@ -4,8 +4,8 @@
 2. Reservas não pagas a tempo: cancela e libera o horário (consultas_service.expirar_reservas).
 3. Assinaturas: confirma cobranças pagas e manda o Pix de renovação (assinaturas_service.processar).
 
-Por que uma thread e não um cron job do Northflank: o banco fica num volume que só o serviço da API
-consegue montar, então um job separado não teria acesso a ele. JOBS=0 desliga a thread (os testes usam isso).
+Por que uma thread e não um cron separado: o servidor precisa ser um processo só (salas em memória),
+e a thread reaproveita a conexão e as funções da própria API. JOBS=0 desliga a thread (os testes usam isso).
 """
 import logging
 import threading
