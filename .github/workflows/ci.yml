@@ -1,5 +1,5 @@
 # Banco do zero (migrations + seed ficticio) e todos os testes de tests/.
-# Nao faz deploy: quem faz e o deploy.yml, num push em release/*, e ele nao espera este job.
+# Nao faz deploy: o deploy.yml roda depois deste workflow, so em push na main e so se ele terminar verde.
 name: CI
 
 on:
