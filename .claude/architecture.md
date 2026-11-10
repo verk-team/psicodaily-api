@@ -155,7 +155,7 @@ if (resposta?.ok) peerConnection.setConfiguration({ iceServers: (await resposta.
   6. sobe o gunicorn em `:8000`.
 
   Se qualquer passo falhar, o container sai antes de receber tráfego. `GET /api/saude` é o readiness probe. `TZ=America/Sao_Paulo` (as rotas comparam com `datetime.now()` local).
-- **Acesso ao banco de produção (DBeaver)**: a 3050 não é publicada. Para abrir, adicione `"127.0.0.1:3050:3050"` aos `ports` da `api`, rode `docker compose up -d` e abra o túnel no Windows com `ssh -L 3050:127.0.0.1:3050 root@<ip-da-vps>`. No DBeaver: `localhost:3050`, banco `/var/lib/firebird/data/BANCO.FDB`, `SYSDBA` com o `DB_PASSWORD` do `.env` da VPS, driver property `encoding=UTF8`, conexão marcada como read-only. Desconectar ao terminar: transação esquecida aberta no Firebird impede a limpeza de versões antigas das linhas e deixa o banco lento.
+- **Acesso ao banco de produção (DBeaver)**: o compose publica a 3050 só em `127.0.0.1` da VPS, então o acesso é por túnel SSH. No DBeaver, aba **SSH** da conexão: host da VPS, porta 22, usuário e senha do SSH. Aba **Main**, vista de dentro da VPS: host `127.0.0.1`, porta `3050`, banco `/var/lib/firebird/data/BANCO.FDB`, `SYSDBA` com o `DB_PASSWORD` do `.env` da VPS; driver property `encoding=UTF8`; conexão marcada como read-only. Desconectar ao terminar: transação esquecida aberta no Firebird impede a limpeza de versões antigas das linhas e deixa o banco lento.
 - **CI**: `.github/workflows/ci.yml` (Firebird 4 oficial em serviço, banco do zero com migrations + seed, `pytest`) em todo push e PR. Não faz deploy.
 - **Dev (WSL)**: `run.sh` sobe um gunicorn ouvindo em `127.0.0.1:8000` e `:8001`.
 - **Por que gthread e não gevent**: `fdb` chama `libfbclient` via ctypes, o que bloquearia o loop do gevent.

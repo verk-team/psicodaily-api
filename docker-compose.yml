@@ -18,8 +18,9 @@ services:
       - firebird-data:/var/lib/firebird/data
     ports:
       # O Docker passa por cima do firewall: o 127.0.0.1 deixa só a própria VPS acessar.
-      # A 3050 (Firebird) não é publicada: só a API fala com ele, por dentro do container.
       - "127.0.0.1:8000:8000"
+      # Firebird para o DBeaver, só por túnel SSH (ver architecture.md); nunca sem o 127.0.0.1
+      - "127.0.0.1:3050:3050"
     # Volta sozinho se cair ou se a VPS reiniciar, menos quando foi parado de propósito
     restart: "unless-stopped"
     healthcheck:
