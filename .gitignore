@@ -8,5 +8,19 @@ __pycache__/
 *.pyd
 database/*.FDB
 usuarios/*.jpg
+
 # instalador do Claude Code, baixado por cada dev
-.claude/install.cmd
+.claude/*
+
+!.claude/decisions/
+!.claude/docs/
+!.claude/plans/
+!.claude/prompts/
+!.claude/skills
+!.claude/architecture.md
+!.claude/CLAUDE.md
+!.claude/architecture
+!.claude/skills-lock.json
+
+# não tem necessidade de versionar isso
+.claude/settings.local.json
